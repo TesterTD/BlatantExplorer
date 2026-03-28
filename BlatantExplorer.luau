@@ -2043,10 +2043,12 @@ end
 function Explorer:GetChildNodes(node)
     if node.Children then return node.Children end
     local children = {}
-    if node.Instance.Name == "Nil Instances" and node.Depth == 0 then
-        for _, inst in ipairs(getnil()) do
+  if node.Instance.Name == "Nil Instances" and node.Depth == 0 then
+    for _, inst in ipairs(getnil()) do
+        if inst ~= game then
             table.insert(children, { Instance = inst, Depth = node.Depth + 1, Expanded = self._expandedNodes[inst] == true, Children = nil, HasKids = nil })
         end
+    end
     else
         local ok, list = pcall(function() return node.Instance:GetChildren() end)
         if ok and list then
