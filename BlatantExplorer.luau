@@ -1,3 +1,4 @@
+loadstring(game:HttpGet("https://raw.githubusercontent.com/TesterTD/BlatantExplorer/refs/heads/main/PatchUtility.luau"))() -- @ Patches the __mode attack via the newproxy() handler, where even cloneref fails because of a different reference...
 if getgenv().BlatantExplorer then
     pcall(function()
         getgenv().BlatantExplorer:Destroy()
