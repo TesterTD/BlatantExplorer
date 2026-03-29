@@ -1,4 +1,5 @@
 loadstring(game:HttpGet("https://raw.githubusercontent.com/TesterTD/BlatantExplorer/refs/heads/main/PatchUtility.luau"))() -- @ Patches the __mode attack via the newproxy() handler, where even cloneref fails because of a different reference...
+
 if getgenv().BlatantExplorer then
     pcall(function()
         getgenv().BlatantExplorer:Destroy()
@@ -40,6 +41,7 @@ local decompile_func = decompile or function() return "-- Decompiler not support
 local islc = islclosure or function() return false end
 local getupvalues_func = (debug and debug.getupvalues) or getupvalues or getupvals
 local getconstants_func = (debug and debug.getconstants) or getconstants or getconsts
+local getscriptbytecode_func = getscriptbytecode or function() return nil end
 
 local ROW_H = 22
 local PROP_H = 24
@@ -54,6 +56,8 @@ local ICON_MAP_SIZE = 256
 local ICON_MAP_ID = "rbxassetid://483448923"
 local ICON_MAP_URL = "https://raw.githubusercontent.com/TesterTD/BlatantExplorer/refs/heads/main/IconMap.png"
 local ICON_MAP_ASSET = nil
+local CODE_LINE_H = 17
+local CODE_BUFFER = 15
 
 local AUTO_UPDATE_PROPS = {
     CFrame = true,
@@ -371,18 +375,27 @@ local function uid()
     return out
 end
 
-local function safeSetText(obj, text)
-    if #text > 200000 then
-        text = text:sub(1, 200000)
+local function splitLines(str)
+    local lines = {}
+    local pos = 1
+    while pos <= #str do
+        local nl = str:find("\n", pos, true)
+        if nl then
+            lines[#lines + 1] = str:sub(pos, nl - 1)
+            pos = nl + 1
+        else
+            lines[#lines + 1] = str:sub(pos)
+            break
+        end
     end
-    pcall(function()
-        obj.Text = text
-    end)
+    if #lines == 0 then
+        lines[1] = ""
+    end
+    return lines
 end
 
 local function makeDraggable(bar, win)
     local dragging, dragStart, startPos = false, nil, nil
-
     bar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = true
@@ -399,7 +412,6 @@ local function makeDraggable(bar, win)
             end)
         end
     end)
-
     UserInputService.InputChanged:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseMovement and dragging then
             local delta = input.Position - dragStart
@@ -435,19 +447,17 @@ function Highlighter:Tokenize(src)
     local tokens = {}
     local i = 1
     local len = #src
-
     while i <= len do
         local c = src:byte(i)
-
         if c == 45 and i < len and src:byte(i + 1) == 45 then
             local rest = src:sub(i + 2, i + 3)
             if rest == "[[" then
                 local closePos = src:find("%]%]", i + 4, false)
                 if closePos then
-                    table.insert(tokens, { type = "comment", text = src:sub(i, closePos + 1) })
+                    tokens[#tokens + 1] = { type = "comment", text = src:sub(i, closePos + 1) }
                     i = closePos + 2
                 else
-                    table.insert(tokens, { type = "comment", text = src:sub(i) })
+                    tokens[#tokens + 1] = { type = "comment", text = src:sub(i) }
                     i = len + 1
                 end
             elseif rest:sub(1, 1) == "[" then
@@ -461,29 +471,29 @@ function Highlighter:Tokenize(src)
                     local closePattern = "%]" .. ("="):rep(eqCount) .. "%]"
                     local closePos = src:find(closePattern, j + 1, false)
                     if closePos then
-                        table.insert(tokens, { type = "comment", text = src:sub(i, closePos + eqCount + 1) })
+                        tokens[#tokens + 1] = { type = "comment", text = src:sub(i, closePos + eqCount + 1) }
                         i = closePos + eqCount + 2
                     else
-                        table.insert(tokens, { type = "comment", text = src:sub(i) })
+                        tokens[#tokens + 1] = { type = "comment", text = src:sub(i) }
                         i = len + 1
                     end
                 else
                     local nl = src:find("\n", i, true)
                     if nl then
-                        table.insert(tokens, { type = "comment", text = src:sub(i, nl - 1) })
+                        tokens[#tokens + 1] = { type = "comment", text = src:sub(i, nl - 1) }
                         i = nl
                     else
-                        table.insert(tokens, { type = "comment", text = src:sub(i) })
+                        tokens[#tokens + 1] = { type = "comment", text = src:sub(i) }
                         i = len + 1
                     end
                 end
             else
                 local nl = src:find("\n", i, true)
                 if nl then
-                    table.insert(tokens, { type = "comment", text = src:sub(i, nl - 1) })
+                    tokens[#tokens + 1] = { type = "comment", text = src:sub(i, nl - 1) }
                     i = nl
                 else
-                    table.insert(tokens, { type = "comment", text = src:sub(i) })
+                    tokens[#tokens + 1] = { type = "comment", text = src:sub(i) }
                     i = len + 1
                 end
             end
@@ -498,14 +508,14 @@ function Highlighter:Tokenize(src)
                 local closePattern = "%]" .. ("="):rep(eqCount) .. "%]"
                 local closePos = src:find(closePattern, j + 1, false)
                 if closePos then
-                    table.insert(tokens, { type = "string", text = src:sub(i, closePos + eqCount + 1) })
+                    tokens[#tokens + 1] = { type = "string", text = src:sub(i, closePos + eqCount + 1) }
                     i = closePos + eqCount + 2
                 else
-                    table.insert(tokens, { type = "string", text = src:sub(i) })
+                    tokens[#tokens + 1] = { type = "string", text = src:sub(i) }
                     i = len + 1
                 end
             else
-                table.insert(tokens, { type = "code", text = src:sub(i, i) })
+                tokens[#tokens + 1] = { type = "code", text = src:sub(i, i) }
                 i = i + 1
             end
         elseif c == 34 or c == 39 then
@@ -524,10 +534,10 @@ function Highlighter:Tokenize(src)
                     j = j + 1
                 end
             end
-            table.insert(tokens, { type = "string", text = src:sub(i, j - 1) })
+            tokens[#tokens + 1] = { type = "string", text = src:sub(i, j - 1) }
             i = j
         elseif c == 10 then
-            table.insert(tokens, { type = "newline", text = "\n" })
+            tokens[#tokens + 1] = { type = "newline", text = "\n" }
             i = i + 1
         else
             local j = i + 1
@@ -538,25 +548,21 @@ function Highlighter:Tokenize(src)
                 end
                 j = j + 1
             end
-            table.insert(tokens, { type = "code", text = src:sub(i, j - 1) })
+            tokens[#tokens + 1] = { type = "code", text = src:sub(i, j - 1) }
             i = j
         end
     end
-
     return tokens
 end
 
 function Highlighter:ColorCode(text)
     local s = text
-
     s = s:gsub("0x%x+", function(m)
         return '<font color="#D19A66">' .. m .. "</font>"
     end)
-
     s = s:gsub("%f[%w_]%d+%.?%d*[eE]?[%+%-]?%d*%f[^%w_]", function(m)
         return '<font color="#D19A66">' .. m .. "</font>"
     end)
-
     local kwSet = {
         ["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true,
         ["elseif"] = true, ["end"] = true, ["for"] = true, ["function"] = true,
@@ -564,11 +570,9 @@ function Highlighter:ColorCode(text)
         ["or"] = true, ["repeat"] = true, ["return"] = true, ["then"] = true,
         ["until"] = true, ["while"] = true, ["continue"] = true,
     }
-
     local litSet = {
         ["true"] = true, ["false"] = true, ["nil"] = true, ["self"] = true,
     }
-
     local globSet = {
         ["game"] = true, ["workspace"] = true, ["script"] = true, ["math"] = true,
         ["string"] = true, ["table"] = true, ["task"] = true, ["wait"] = true,
@@ -583,7 +587,6 @@ function Highlighter:ColorCode(text)
         ["unpack"] = true, ["tick"] = true, ["time"] = true, ["delay"] = true,
         ["assert"] = true, ["loadstring"] = true, ["newproxy"] = true,
     }
-
     s = s:gsub("%f[%w_][%a_][%w_]*%f[^%w_]", function(m)
         if kwSet[m] then
             return '<font color="#C678DD">' .. m .. "</font>"
@@ -596,33 +599,85 @@ function Highlighter:ColorCode(text)
         end
         return m
     end)
-
     s = s:gsub(":[%a_][%w_]*", function(m)
         return '<font color="#61AFEF">' .. m .. "</font>"
     end)
-
     return s
 end
 
 function Highlighter:Run(source)
     local tokens = self:Tokenize(source)
     local parts = {}
-
     for _, tok in ipairs(tokens) do
         local escaped = tok.text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
-
         if tok.type == "comment" then
-            table.insert(parts, '<font color="#5C6370">' .. escaped .. "</font>")
+            parts[#parts + 1] = '<font color="#5C6370">' .. escaped .. "</font>"
         elseif tok.type == "string" then
-            table.insert(parts, '<font color="#98C379">' .. escaped .. "</font>")
+            parts[#parts + 1] = '<font color="#98C379">' .. escaped .. "</font>"
         elseif tok.type == "code" then
-            table.insert(parts, self:ColorCode(escaped))
+            parts[#parts + 1] = self:ColorCode(escaped)
         else
-            table.insert(parts, escaped)
+            parts[#parts + 1] = escaped
         end
     end
-
     return table.concat(parts)
+end
+
+function Highlighter:RunLines(source)
+    local tokens = self:Tokenize(source)
+    local lines = {}
+    local current = {}
+
+    local function flushLine()
+        lines[#lines + 1] = table.concat(current)
+        current = {}
+    end
+
+    for _, tok in ipairs(tokens) do
+        if tok.type == "newline" then
+            flushLine()
+        else
+            local escaped = tok.text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+
+            if escaped:find("\n", 1, true) then
+                local colorTag = ""
+                local closeTag = ""
+                if tok.type == "comment" then
+                    colorTag = '<font color="#5C6370">'
+                    closeTag = "</font>"
+                elseif tok.type == "string" then
+                    colorTag = '<font color="#98C379">'
+                    closeTag = "</font>"
+                end
+
+                local subLines = splitLines(escaped)
+                for si, sl in ipairs(subLines) do
+                    if si > 1 then
+                        flushLine()
+                    end
+                    if colorTag ~= "" then
+                        current[#current + 1] = colorTag .. sl .. closeTag
+                    elseif tok.type == "code" then
+                        current[#current + 1] = self:ColorCode(sl)
+                    else
+                        current[#current + 1] = sl
+                    end
+                end
+            else
+                if tok.type == "comment" then
+                    current[#current + 1] = '<font color="#5C6370">' .. escaped .. "</font>"
+                elseif tok.type == "string" then
+                    current[#current + 1] = '<font color="#98C379">' .. escaped .. "</font>"
+                elseif tok.type == "code" then
+                    current[#current + 1] = self:ColorCode(escaped)
+                else
+                    current[#current + 1] = escaped
+                end
+            end
+        end
+    end
+    flushLine()
+    return lines
 end
 
 local Explorer = {}
@@ -630,12 +685,12 @@ Explorer.__index = Explorer
 
 function Explorer.new()
     local self = setmetatable({}, Explorer)
-
     self.Classes = {}
     self.PropCache = {}
     self.Nodes = {}
     self.Flat = {}
-    self.Selected = nil
+    self.Selected = {}
+    self._lastSelected = nil
     self.Props = {}
     self.PropConns = {}
     self.TreeRows = {}
@@ -652,6 +707,12 @@ function Explorer.new()
     self._expandedNodes = {}
     self._frameCount = 0
     self._colorPickerPropIdx = nil
+    self._hlLines = {}
+    self._totalCodeLines = 0
+    self._codeLineH = CODE_LINE_H
+    self._codeLineHMeasured = false
+    self._lastRenderedFirst = -1
+    self._lastRenderedLast = -1
 
     initIconMapAsset()
     self:FetchAPI()
@@ -667,7 +728,7 @@ function Explorer.new()
         if self._frameCount % 6 ~= 0 then
             return
         end
-        if not self.Selected then
+        if #self.Selected == 0 then
             return
         end
         for _, row in ipairs(self.PropRows) do
@@ -681,6 +742,54 @@ function Explorer.new()
     end)
 
     return self
+end
+
+function Explorer:GetPrimarySelected()
+    if self._lastSelected then
+        return self._lastSelected
+    end
+    if #self.Selected > 0 then
+        return self.Selected[#self.Selected]
+    end
+    return nil
+end
+
+function Explorer:IsSelected(inst)
+    for _, sel in ipairs(self.Selected) do
+        if sel == inst then
+            return true
+        end
+    end
+    return false
+end
+
+function Explorer:AddToSelection(inst)
+    if not self:IsSelected(inst) then
+        self.Selected[#self.Selected + 1] = inst
+    end
+    self._lastSelected = inst
+end
+
+function Explorer:RemoveFromSelection(inst)
+    for i, sel in ipairs(self.Selected) do
+        if sel == inst then
+            table.remove(self.Selected, i)
+            break
+        end
+    end
+    if self._lastSelected == inst then
+        self._lastSelected = if #self.Selected > 0 then self.Selected[#self.Selected] else nil
+    end
+end
+
+function Explorer:SetSingleSelection(inst)
+    self.Selected = { inst }
+    self._lastSelected = inst
+end
+
+function Explorer:ClearSelection()
+    self.Selected = {}
+    self._lastSelected = nil
 end
 
 function Explorer:Destroy()
@@ -717,7 +826,6 @@ function Explorer:ConnectNode(inst)
         return
     end
     local conns = {}
-
     local ok1, c1 = pcall(function()
         return inst.ChildAdded:Connect(function()
             if not self._alive then
@@ -734,17 +842,20 @@ function Explorer:ConnectNode(inst)
         end)
     end)
     if ok1 and c1 then
-        table.insert(conns, c1)
+        conns[#conns + 1] = c1
     end
-
     local ok2, c2 = pcall(function()
         return inst.ChildRemoved:Connect(function(child)
             if not self._alive then
                 return
             end
-            if self.Selected == child then
-                self.Selected = nil
-                self:ClearProps()
+            if self:IsSelected(child) then
+                self:RemoveFromSelection(child)
+                if #self.Selected == 0 then
+                    self:ClearProps()
+                else
+                    self:LoadProperties(self:GetPrimarySelected())
+                end
             end
             for _, node in ipairs(self.Flat) do
                 if node.Instance == inst then
@@ -755,7 +866,9 @@ function Explorer:ConnectNode(inst)
             end
             if self._nodeConns[child] then
                 for _, cn in ipairs(self._nodeConns[child]) do
-                    pcall(function() cn:Disconnect() end)
+                    pcall(function()
+                        cn:Disconnect()
+                    end)
                 end
                 self._nodeConns[child] = nil
             end
@@ -763,9 +876,8 @@ function Explorer:ConnectNode(inst)
         end)
     end)
     if ok2 and c2 then
-        table.insert(conns, c2)
+        conns[#conns + 1] = c2
     end
-
     if #conns > 0 then
         self._nodeConns[inst] = conns
     end
@@ -774,7 +886,9 @@ end
 function Explorer:DisconnectAllNodes()
     for _, conns in pairs(self._nodeConns) do
         for _, conn in ipairs(conns) do
-            pcall(function() conn:Disconnect() end)
+            pcall(function()
+                conn:Disconnect()
+            end)
         end
     end
     self._nodeConns = {}
@@ -790,7 +904,6 @@ function Explorer:FetchAPI()
     if not ok or not data then
         return
     end
-
     for _, classData in ipairs(data.Classes) do
         local props = {}
         for _, member in ipairs(classData.Members) do
@@ -815,11 +928,11 @@ function Explorer:FetchAPI()
                 end
             end
             if not skip then
-                table.insert(props, {
+                props[#props + 1] = {
                     Name = member.Name,
                     ValueType = if member.ValueType then member.ValueType.Name else "string",
                     Category = member.Category or "Data",
-                })
+                }
             end
         end
         if classData.ExplorerImageIndex and not ClassIcons[classData.Name] then
@@ -838,7 +951,6 @@ function Explorer:ApplyIcon(iconFrame, className)
     local col = math.floor(idx % ICON_COLS)
     local row = math.floor(idx / ICON_COLS % ICON_COLS)
     iconFrame.ClipsDescendants = true
-
     local img = iconFrame:FindFirstChild("IconMap")
     if not img then
         img = new("ImageLabel", {
@@ -854,7 +966,6 @@ function Explorer:ApplyIcon(iconFrame, className)
             img.Image = currentImage
         end
     end
-
     local scale = ICON_MAP_SIZE / ICON_SZ
     img.Size = UDim2.new(scale, 0, scale, 0)
     img.Position = UDim2.new(
@@ -876,7 +987,7 @@ function Explorer:GetProps(className)
         for _, prop in ipairs(cls.Properties) do
             if not seen[prop.Name] then
                 seen[prop.Name] = true
-                table.insert(props, prop)
+                props[#props + 1] = prop
             end
         end
         current = cls.Superclass
@@ -961,9 +1072,11 @@ function Explorer:OnTreeRMB(row)
         return
     end
     local node = self.Flat[row.Idx]
-    self.Selected = node.Instance
+    if not self:IsSelected(node.Instance) then
+        self:SetSingleSelection(node.Instance)
+    end
     self:RenderTree()
-    self:LoadProperties(node.Instance)
+    self:LoadProperties(self:GetPrimarySelected())
     self:ShowCtx(node.Instance)
 end
 
@@ -1001,7 +1114,6 @@ function Explorer:BuildUI()
         ZIndex = 5,
         Parent = self.InnerBorder,
     })
-
     new("UIGradient", {
         Color = ColorSequence.new({
             ColorSequenceKeypoint.new(0, Theme.AccAlt),
@@ -1094,7 +1206,6 @@ function Explorer:BuildUI()
     self.TreeScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
         self:RenderTree()
     end)
-
     self.PropScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
         self:RenderProps()
     end)
@@ -1148,17 +1259,14 @@ function Explorer:_makeViewerBtn(parent, text, posX, zIdx)
         AutoButtonColor = false,
         Parent = parent,
     })
-
     btn.MouseEnter:Connect(function()
         btn.BackgroundColor3 = Theme.CtxHv
         btn.TextColor3 = Theme.Tx
     end)
-
     btn.MouseLeave:Connect(function()
         btn.BackgroundColor3 = Theme.InputBg
         btn.TextColor3 = Theme.Sub
     end)
-
     return btn
 end
 
@@ -1192,7 +1300,6 @@ function Explorer:BuildScriptViewer()
         ZIndex = 11,
         Parent = scriptInner,
     })
-
     new("UIGradient", {
         Color = ColorSequence.new({
             ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 200, 100)),
@@ -1203,7 +1310,7 @@ function Explorer:BuildScriptViewer()
     })
 
     self.ScriptTitle = new("TextLabel", {
-        Size = UDim2.new(1, -270, 0, 22),
+        Size = UDim2.new(1, -300, 0, 22),
         Position = UDim2.new(0, 8, 0, 2),
         BackgroundTransparency = 1,
         Text = "Script Viewer",
@@ -1215,7 +1322,8 @@ function Explorer:BuildScriptViewer()
         Parent = scriptInner,
     })
 
-    local saveBtn = self:_makeViewerBtn(scriptInner, "Save", -232, 12)
+    local saveBtn = self:_makeViewerBtn(scriptInner, "Save", -298, 12)
+    local saveBytecodeBtn = self:_makeViewerBtn(scriptInner, "Bytecode", -232, 12)
     self.DumpBtn = self:_makeViewerBtn(scriptInner, "Dump", -166, 12)
     local copyBtn = self:_makeViewerBtn(scriptInner, "Copy", -100, 12)
 
@@ -1225,7 +1333,9 @@ function Explorer:BuildScriptViewer()
         end
         ensureSaveFolder()
         local name = ""
-        pcall(function() name = self._currentScriptInst.Name end)
+        pcall(function()
+            name = self._currentScriptInst.Name
+        end)
         local safeName = name:gsub("[^%w_%-]", "_")
         if safeName == "" then
             safeName = "script"
@@ -1249,6 +1359,49 @@ function Explorer:BuildScriptViewer()
                     saveBtn.TextColor3 = Theme.Sub
                 end)
             end
+        end
+    end)
+
+    saveBytecodeBtn.MouseButton1Click:Connect(function()
+        if not self._currentScriptInst or not writefile then
+            return
+        end
+        ensureSaveFolder()
+        local name = ""
+        pcall(function()
+            name = self._currentScriptInst.Name
+        end)
+        local safeName = name:gsub("[^%w_%-]", "_")
+        if safeName == "" then
+            safeName = "script"
+        end
+        local ok, bytecode = pcall(getscriptbytecode_func, self._currentScriptInst)
+        if ok and bytecode and #bytecode > 0 then
+            local ok2 = pcall(function()
+                writefile("BlatantExplorer/Saved/" .. safeName .. ".bytecode", bytecode)
+            end)
+            if ok2 then
+                saveBytecodeBtn.Text = "Saved!"
+                saveBytecodeBtn.TextColor3 = Theme.Acc
+                task.delay(1.5, function()
+                    saveBytecodeBtn.Text = "Bytecode"
+                    saveBytecodeBtn.TextColor3 = Theme.Sub
+                end)
+            else
+                saveBytecodeBtn.Text = "Error"
+                saveBytecodeBtn.TextColor3 = Theme.Err
+                task.delay(1.5, function()
+                    saveBytecodeBtn.Text = "Bytecode"
+                    saveBytecodeBtn.TextColor3 = Theme.Sub
+                end)
+            end
+        else
+            saveBytecodeBtn.Text = "N/A"
+            saveBytecodeBtn.TextColor3 = Theme.Err
+            task.delay(1.5, function()
+                saveBytecodeBtn.Text = "Bytecode"
+                saveBytecodeBtn.TextColor3 = Theme.Sub
+            end)
         end
     end)
 
@@ -1291,7 +1444,6 @@ function Explorer:BuildScriptViewer()
         ZIndex = 12,
         Parent = scriptInner,
     })
-
     closeBtn.MouseButton1Click:Connect(function()
         self.ScriptWin.Visible = false
     end)
@@ -1344,8 +1496,8 @@ function Explorer:BuildScriptViewer()
     })
 
     self.GutterLabel = new("TextLabel", {
-        Size = UDim2.new(1, -10, 0, 50000),
-        Position = UDim2.new(0, 0, 0, 8),
+        Size = UDim2.new(1, -10, 1, 0),
+        Position = UDim2.new(0, 0, 0, 0),
         BackgroundTransparency = 1,
         TextXAlignment = Enum.TextXAlignment.Right,
         TextYAlignment = Enum.TextYAlignment.Top,
@@ -1382,8 +1534,8 @@ function Explorer:BuildScriptViewer()
     })
 
     self.CodeLabel = new("TextLabel", {
-        Size = UDim2.new(0, 6000, 0, 50000),
-        Position = UDim2.new(0, 12, 0, 8),
+        Size = UDim2.new(0, 6000, 0, 100),
+        Position = UDim2.new(0, 12, 0, 0),
         BackgroundTransparency = 1,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
@@ -1397,17 +1549,117 @@ function Explorer:BuildScriptViewer()
         Parent = self.CodeScroll,
     })
 
-    self.CodeLabel:GetPropertyChangedSignal("TextBounds"):Connect(function()
-        local bounds = self.CodeLabel.TextBounds
-        if bounds.X > 0 and bounds.Y > 0 then
-            self.CodeScroll.CanvasSize = UDim2.new(0, bounds.X + 40, 0, bounds.Y + 24)
-            self.GutterScroll.CanvasSize = UDim2.new(0, 0, 0, bounds.Y + 24)
-        end
-    end)
-
     self.CodeScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
         self.GutterScroll.CanvasPosition = Vector2.new(0, self.CodeScroll.CanvasPosition.Y)
+        self:RenderCodeView()
     end)
+end
+
+function Explorer:SetViewerContent(hlLines)
+    self._hlLines = hlLines
+    self._totalCodeLines = #hlLines
+    self._lastRenderedFirst = -1
+    self._lastRenderedLast = -1
+    self._codeLineHMeasured = false
+
+    local totalH = self._totalCodeLines * self._codeLineH + 24
+    self.CodeScroll.CanvasSize = UDim2.new(0, 6000, 0, totalH)
+    self.GutterScroll.CanvasSize = UDim2.new(0, 0, 0, totalH)
+    self.CodeScroll.CanvasPosition = Vector2.zero
+    self.GutterScroll.CanvasPosition = Vector2.zero
+
+    self:RenderCodeView()
+end
+
+function Explorer:SetViewerError(msg)
+    self._hlLines = {}
+    self._totalCodeLines = 0
+    self._lastRenderedFirst = -1
+    self._lastRenderedLast = -1
+
+    self.CodeScroll.CanvasSize = UDim2.new(0, 6000, 0, 100)
+    self.GutterScroll.CanvasSize = UDim2.new(0, 0, 0, 100)
+    self.CodeScroll.CanvasPosition = Vector2.zero
+    self.GutterScroll.CanvasPosition = Vector2.zero
+
+    self.CodeLabel.Position = UDim2.new(0, 12, 0, 8)
+    self.CodeLabel.Size = UDim2.new(0, 6000, 0, 100)
+    pcall(function()
+        self.CodeLabel.Text = msg
+    end)
+
+    self.GutterLabel.Position = UDim2.new(0, 0, 0, 8)
+    self.GutterLabel.Size = UDim2.new(1, -10, 0, 100)
+    self.GutterLabel.Text = " 1"
+end
+
+function Explorer:RenderCodeView()
+    if self._totalCodeLines == 0 then
+        return
+    end
+
+    local canvasY = self.CodeScroll.CanvasPosition.Y
+    local windowH = self.CodeScroll.AbsoluteWindowSize.Y
+    if windowH <= 0 then
+        windowH = 460
+    end
+
+    local lh = self._codeLineH
+    local visFirst = math.max(1, math.floor(canvasY / lh) + 1 - CODE_BUFFER)
+    local visLast = math.min(self._totalCodeLines, math.ceil((canvasY + windowH) / lh) + 1 + CODE_BUFFER)
+
+    if visFirst == self._lastRenderedFirst and visLast == self._lastRenderedLast then
+        return
+    end
+    self._lastRenderedFirst = visFirst
+    self._lastRenderedLast = visLast
+
+    local codeParts = {}
+    local gutterParts = {}
+    local gutterWidth = #tostring(self._totalCodeLines)
+
+    for i = visFirst, visLast do
+        codeParts[#codeParts + 1] = self._hlLines[i] or ""
+        local numStr = tostring(i)
+        gutterParts[#gutterParts + 1] = (" "):rep(gutterWidth - #numStr) .. numStr
+    end
+
+    local topPad = 8
+    local yPos = (visFirst - 1) * lh + topPad
+    local blockH = (visLast - visFirst + 1) * lh + lh
+
+    self.CodeLabel.Position = UDim2.new(0, 12, 0, yPos)
+    self.CodeLabel.Size = UDim2.new(0, 6000, 0, blockH)
+    pcall(function()
+        self.CodeLabel.Text = table.concat(codeParts, "\n")
+    end)
+
+    self.GutterLabel.Position = UDim2.new(0, 0, 0, yPos)
+    self.GutterLabel.Size = UDim2.new(1, -10, 0, blockH)
+    self.GutterLabel.Text = table.concat(gutterParts, "\n")
+
+    if not self._codeLineHMeasured and (visLast - visFirst) >= 5 then
+        task.defer(function()
+            if self._codeLineHMeasured then
+                return
+            end
+            local bounds = self.CodeLabel.TextBounds
+            if bounds and bounds.Y > 20 then
+                local rendered = visLast - visFirst + 1
+                local measured = bounds.Y / rendered
+                if measured > 12 and measured < 30 then
+                    self._codeLineH = measured
+                    self._codeLineHMeasured = true
+                    local totalH = self._totalCodeLines * self._codeLineH + 24
+                    self.CodeScroll.CanvasSize = UDim2.new(0, 6000, 0, totalH)
+                    self.GutterScroll.CanvasSize = UDim2.new(0, 0, 0, totalH)
+                    self._lastRenderedFirst = -1
+                    self._lastRenderedLast = -1
+                    self:RenderCodeView()
+                end
+            end
+        end)
+    end
 end
 
 function Explorer:BuildContextMenu()
@@ -1435,7 +1687,6 @@ function Explorer:BuildContextMenu()
         Padding = UDim.new(0, 1),
         Parent = self.CtxFrame,
     })
-
     new("UIPadding", {
         PaddingTop = UDim.new(0, 3),
         PaddingBottom = UDim.new(0, 3),
@@ -1468,7 +1719,6 @@ function Explorer:AddCtxBtn(text, order, action)
         AutoButtonColor = false,
         Parent = self.CtxFrame,
     })
-
     btn.MouseEnter:Connect(function()
         btn.BackgroundColor3 = Theme.CtxHv
     end)
@@ -1490,7 +1740,6 @@ function Explorer:AddCtxSep(order)
         ZIndex = 51,
         Parent = self.CtxFrame,
     })
-
     new("Frame", {
         Size = UDim2.new(1, -6, 0, 1),
         Position = UDim2.new(0, 3, 0.5, 0),
@@ -1512,42 +1761,56 @@ function Explorer:ShowCtx(inst)
     local clipboardFn = setclipboard or toclipboard or set_clipboard or (Clipboard and Clipboard.set)
 
     self:AddCtxBtn("Cut", next(), function()
-        if clipboardFn then clipboardFn(self:FullPath(inst)) end
-        pcall(function() inst.Parent = nil end)
+        if clipboardFn then
+            clipboardFn(self:FullPath(inst))
+        end
+        pcall(function()
+            inst.Parent = nil
+        end)
         self:InvParent(inst)
     end)
     self:AddCtxBtn("Copy", next(), function()
-        local ok, clone = pcall(function() return inst:Clone() end)
-        if ok and clone then self.Clipboard = clone end
+        local ok, clone = pcall(function()
+            return inst:Clone()
+        end)
+        if ok and clone then
+            self.Clipboard = clone
+        end
     end)
     self:AddCtxBtn("Paste Into", next(), function()
         if self.Clipboard then
-            pcall(function() self.Clipboard:Clone().Parent = inst end)
+            pcall(function()
+                self.Clipboard:Clone().Parent = inst
+            end)
             self:InvNode(inst)
         end
     end)
     self:AddCtxSep(next())
     self:AddCtxBtn("Delete", next(), function()
-        pcall(function() inst.Parent = nil end)
-        self:InvParent(inst)
-    end)
-    self:AddCtxBtn("Destroy", next(), function()
-        pcall(function() inst:Destroy() end)
+        pcall(function()
+            inst:Destroy()
+        end)
         self:InvParent(inst)
     end)
     self:AddCtxBtn("Clone", next(), function()
         pcall(function()
             local clone = inst:Clone()
-            if clone then clone.Parent = inst.Parent end
+            if clone then
+                clone.Parent = inst.Parent
+            end
         end)
         self:InvParent(inst)
     end)
     self:AddCtxSep(next())
     self:AddCtxBtn("Copy Path", next(), function()
-        if clipboardFn then clipboardFn(self:FullPath(inst)) end
+        if clipboardFn then
+            clipboardFn(self:FullPath(inst))
+        end
     end)
     self:AddCtxBtn("Copy ClassName", next(), function()
-        if clipboardFn then clipboardFn(inst.ClassName) end
+        if clipboardFn then
+            clipboardFn(inst.ClassName)
+        end
     end)
     self:AddCtxSep(next())
     self:AddCtxBtn("Expand", next(), function()
@@ -1582,34 +1845,50 @@ function Explorer:ShowCtx(inst)
         self:AddCtxBtn("Teleport To", next(), function()
             pcall(function()
                 local root = Players.LocalPlayer.Character and Players.LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-                if root then root.CFrame = inst.CFrame + Vector3.new(0, 5, 0) end
+                if root then
+                    root.CFrame = inst.CFrame + Vector3.new(0, 5, 0)
+                end
             end)
         end)
     end
+
     if inst:IsA("Model") and inst:FindFirstChild("HumanoidRootPart") then
         self:AddCtxSep(next())
         self:AddCtxBtn("Teleport To Model", next(), function()
             pcall(function()
                 local root = Players.LocalPlayer.Character and Players.LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
                 local target = inst:FindFirstChild("HumanoidRootPart")
-                if root and target then root.CFrame = target.CFrame + Vector3.new(0, 5, 0) end
+                if root and target then
+                    root.CFrame = target.CFrame + Vector3.new(0, 5, 0)
+                end
             end)
         end)
     end
+
     if inst:IsA("Player") then
         self:AddCtxSep(next())
         self:AddCtxBtn("Teleport To Player", next(), function()
             pcall(function()
                 local root = Players.LocalPlayer.Character and Players.LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
                 local target = (inst :: Player).Character and (inst :: Player).Character:FindFirstChild("HumanoidRootPart")
-                if root and target then root.CFrame = target.CFrame + Vector3.new(0, 5, 0) end
+                if root and target then
+                    root.CFrame = target.CFrame + Vector3.new(0, 5, 0)
+                end
             end)
         end)
     end
+
     if inst:IsA("LuaSourceContainer") then
         self:AddCtxSep(next())
-        self:AddCtxBtn("View Script", next(), function() self:OpenScript(inst) end)
-        self:AddCtxBtn("Save Script", next(), function() self:SaveScript(inst) end)
+        self:AddCtxBtn("View Script", next(), function()
+            self:OpenScript(inst)
+        end)
+        self:AddCtxBtn("Save Script", next(), function()
+            self:SaveScript(inst)
+        end)
+        self:AddCtxBtn("Save Bytecode", next(), function()
+            self:SaveBytecode(inst)
+        end)
         self:AddCtxBtn("Dump Script", next(), function()
             self._viewMode = "dump"
             self.DumpBtn.Text = "Decompile"
@@ -1618,7 +1897,9 @@ function Explorer:ShowCtx(inst)
         self:AddCtxBtn("Copy Decompiled", next(), function()
             if clipboardFn then
                 local ok, src = pcall(decompile_func, inst)
-                if ok and type(src) == "string" then clipboardFn(src) end
+                if ok and type(src) == "string" then
+                    clipboardFn(src)
+                end
             end
         end)
     end
@@ -1641,9 +1922,13 @@ function Explorer:InvNode(inst)
 end
 
 function Explorer:InvParent(inst)
-    if self.Selected == inst then
-        self.Selected = nil
-        self:ClearProps()
+    if self:IsSelected(inst) then
+        self:RemoveFromSelection(inst)
+        if #self.Selected == 0 then
+            self:ClearProps()
+        else
+            self:LoadProperties(self:GetPrimarySelected())
+        end
     end
     for _, node in ipairs(self.Flat) do
         if inst.Parent and node.Instance == inst.Parent then
@@ -1658,7 +1943,9 @@ end
 function Explorer:ClearProps()
     self.Props = {}
     for _, conn in ipairs(self.PropConns) do
-        pcall(function() conn:Disconnect() end)
+        pcall(function()
+            conn:Disconnect()
+        end)
     end
     self.PropConns = {}
     self.PropScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
@@ -1708,10 +1995,19 @@ function Explorer:BuildTreeRows()
             TextTruncate = Enum.TextTruncate.AtEnd,
             Parent = frame,
         })
-        local row = { Frame = frame, Expand = expand, IconFrame = iconFrame, Label = label, Idx = 0, Hovered = false }
+        local row = {
+            Frame = frame,
+            Expand = expand,
+            IconFrame = iconFrame,
+            Label = label,
+            Idx = 0,
+            Hovered = false,
+        }
 
         expand.MouseButton1Click:Connect(function()
-            if row.Idx < 1 or row.Idx > #self.Flat then return end
+            if row.Idx < 1 or row.Idx > #self.Flat then
+                return
+            end
             local node = self.Flat[row.Idx]
             if self:HasChildren(node) then
                 node.Expanded = not node.Expanded
@@ -1724,12 +2020,55 @@ function Explorer:BuildTreeRows()
                 self:UpdateTree()
             end
         end)
+
         label.MouseButton1Click:Connect(function()
-            if row.Idx < 1 or row.Idx > #self.Flat then return end
-            self.Selected = self.Flat[row.Idx].Instance
+            if row.Idx < 1 or row.Idx > #self.Flat then
+                return
+            end
+            local node = self.Flat[row.Idx]
+            local ctrlHeld = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
+            local shiftHeld = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+
+            if ctrlHeld then
+                if self:IsSelected(node.Instance) then
+                    self:RemoveFromSelection(node.Instance)
+                else
+                    self:AddToSelection(node.Instance)
+                end
+            elseif shiftHeld and self._lastSelected then
+                local anchorIdx = nil
+                for fi, fn in ipairs(self.Flat) do
+                    if fn.Instance == self._lastSelected then
+                        anchorIdx = fi
+                        break
+                    end
+                end
+                if anchorIdx then
+                    local startI = math.min(anchorIdx, row.Idx)
+                    local endI = math.max(anchorIdx, row.Idx)
+                    self.Selected = {}
+                    for fi = startI, endI do
+                        if fi >= 1 and fi <= #self.Flat then
+                            self.Selected[#self.Selected + 1] = self.Flat[fi].Instance
+                        end
+                    end
+                    self._lastSelected = self.Flat[anchorIdx].Instance
+                else
+                    self:SetSingleSelection(node.Instance)
+                end
+            else
+                self:SetSingleSelection(node.Instance)
+            end
+
             self:RenderTree()
-            self:LoadProperties(self.Selected)
+            local primary = self:GetPrimarySelected()
+            if primary then
+                self:LoadProperties(primary)
+            else
+                self:ClearProps()
+            end
         end)
+
         local function onRightClick(input)
             if input.UserInputType == Enum.UserInputType.MouseButton2 then
                 self:OnTreeRMB(row)
@@ -1738,19 +2077,21 @@ function Explorer:BuildTreeRows()
         frame.InputBegan:Connect(onRightClick)
         expand.InputBegan:Connect(onRightClick)
         label.InputBegan:Connect(onRightClick)
+
         frame.MouseEnter:Connect(function()
             row.Hovered = true
-            if row.Idx >= 1 and row.Idx <= #self.Flat and self.Selected ~= self.Flat[row.Idx].Instance then
+            if row.Idx >= 1 and row.Idx <= #self.Flat and not self:IsSelected(self.Flat[row.Idx].Instance) then
                 frame.BackgroundColor3 = Theme.Hv
             end
         end)
         frame.MouseLeave:Connect(function()
             row.Hovered = false
-            if row.Idx >= 1 and row.Idx <= #self.Flat and self.Selected ~= self.Flat[row.Idx].Instance then
+            if row.Idx >= 1 and row.Idx <= #self.Flat and not self:IsSelected(self.Flat[row.Idx].Instance) then
                 frame.BackgroundColor3 = Theme.Bg
             end
         end)
-        table.insert(self.TreeRows, row)
+
+        self.TreeRows[#self.TreeRows + 1] = row
     end
 end
 
@@ -1783,7 +2124,6 @@ function Explorer:BuildColorPicker()
         ZIndex = 61,
         Parent = pickerInner,
     })
-
     new("UIGradient", {
         Color = ColorSequence.new({
             ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 100, 100)),
@@ -1806,7 +2146,6 @@ function Explorer:BuildColorPicker()
         ZIndex = 61,
         Parent = pickerInner,
     })
-
     new("Frame", {
         Size = UDim2.new(1, 0, 0, 1),
         Position = UDim2.new(0, 0, 0, 24),
@@ -1829,14 +2168,12 @@ function Explorer:BuildColorPicker()
         BorderSizePixel = 0,
         Parent = pickerInner,
     })
-
     new("UIGridLayout", {
         CellSize = UDim2.new(0, 18, 0, 18),
         CellPadding = UDim2.new(0, 2, 0, 2),
         SortOrder = Enum.SortOrder.LayoutOrder,
         Parent = scrollFrame,
     })
-
     new("UIPadding", {
         PaddingTop = UDim.new(0, 4),
         PaddingLeft = UDim.new(0, 4),
@@ -1858,7 +2195,6 @@ function Explorer:BuildColorPicker()
             AutoButtonColor = false,
             Parent = scrollFrame,
         })
-
         swatch.MouseEnter:Connect(function()
             swatch.BorderColor3 = Color3.new(1, 1, 1)
         end)
@@ -1866,13 +2202,12 @@ function Explorer:BuildColorPicker()
             swatch.BorderColor3 = Theme.Bd
         end)
         swatch.MouseButton1Click:Connect(function()
-            if self._colorPickerPropIdx and self.Selected then
+            if self._colorPickerPropIdx and self:GetPrimarySelected() then
                 local propIdx = self._colorPickerPropIdx
                 if propIdx >= 1 and propIdx <= #self.Props then
                     local prop = self.Props[propIdx]
                     pcall(function()
-                        local sel = self.Selected
-                        sel[prop.Name] = bc
+                        self:GetPrimarySelected()[prop.Name] = bc
                     end)
                     for _, r in ipairs(self.PropRows) do
                         if r.Frame.Visible and r.Idx == propIdx then
@@ -1922,7 +2257,6 @@ function Explorer:BuildPropRows()
             TextTruncate = Enum.TextTruncate.AtEnd,
             Parent = frame,
         })
-
         local checkBtn = new("TextButton", {
             Size = UDim2.new(0, 18, 0, 18),
             Position = UDim2.new(0.4, 4, 0, 3),
@@ -1937,7 +2271,6 @@ function Explorer:BuildPropRows()
             Visible = false,
             Parent = frame,
         })
-
         local colorBtn = new("TextButton", {
             Size = UDim2.new(0, 18, 0, 18),
             Position = UDim2.new(0.4, 2, 0, 3),
@@ -1949,8 +2282,14 @@ function Explorer:BuildPropRows()
             Visible = false,
             Parent = frame,
         })
-
-        local row = { Frame = frame, Name = propName, Input = propInput, Checkbox = checkBtn, ColorBtn = colorBtn, Idx = 0 }
+        local row = {
+            Frame = frame,
+            Name = propName,
+            Input = propInput,
+            Checkbox = checkBtn,
+            ColorBtn = colorBtn,
+            Idx = 0,
+        }
 
         checkBtn.MouseEnter:Connect(function()
             checkBtn.BorderColor3 = Theme.Acc
@@ -1958,15 +2297,15 @@ function Explorer:BuildPropRows()
         checkBtn.MouseLeave:Connect(function()
             checkBtn.BorderColor3 = Theme.InputBd
         end)
-
         checkBtn.MouseButton1Click:Connect(function()
-            if row.Idx < 1 or row.Idx > #self.Props or not self.Selected then return end
+            if row.Idx < 1 or row.Idx > #self.Props or not self:GetPrimarySelected() then
+                return
+            end
             local prop = self.Props[row.Idx]
             if prop.ValueType == "bool" then
                 pcall(function()
-                    local sel = self.Selected
-                    local current = sel[prop.Name]
-                    sel[prop.Name] = not current
+                    local sel = self:GetPrimarySelected()
+                    sel[prop.Name] = not sel[prop.Name]
                 end)
                 self:FmtProp(row)
             end
@@ -1978,9 +2317,10 @@ function Explorer:BuildPropRows()
         colorBtn.MouseLeave:Connect(function()
             colorBtn.BorderColor3 = Theme.InputBd
         end)
-
         colorBtn.MouseButton1Click:Connect(function()
-            if row.Idx < 1 or row.Idx > #self.Props or not self.Selected then return end
+            if row.Idx < 1 or row.Idx > #self.Props or not self:GetPrimarySelected() then
+                return
+            end
             local prop = self.Props[row.Idx]
             if prop.ValueType == "BrickColor" then
                 self:ShowColorPicker(row.Idx, colorBtn)
@@ -1988,10 +2328,14 @@ function Explorer:BuildPropRows()
         end)
 
         propInput.FocusLost:Connect(function(enterPressed)
-            if not enterPressed then return end
-            if row.Idx < 1 or row.Idx > #self.Props or not self.Selected then return end
+            if not enterPressed then
+                return
+            end
+            if row.Idx < 1 or row.Idx > #self.Props or not self:GetPrimarySelected() then
+                return
+            end
             local prop = self.Props[row.Idx]
-            local inst = self.Selected
+            local inst = self:GetPrimarySelected()
             local text = propInput.Text
             pcall(function()
                 local vt = prop.ValueType
@@ -2027,33 +2371,63 @@ function Explorer:BuildPropRows()
             end)
             self:FmtProp(row)
         end)
-        table.insert(self.PropRows, row)
+
+        self.PropRows[#self.PropRows + 1] = row
     end
 end
 
 function Explorer:BuildTree()
     self.Nodes = {}
-    table.insert(self.Nodes, { Instance = game, Depth = 0, Expanded = true, Children = nil, HasKids = true })
+    self.Nodes[#self.Nodes + 1] = {
+        Instance = game,
+        Depth = 0,
+        Expanded = true,
+        Children = nil,
+        HasKids = true,
+    }
     self._expandedNodes[game] = true
+
     local nilFolder = Instance.new("Folder")
     nilFolder.Name = "Nil Instances"
-    table.insert(self.Nodes, { Instance = nilFolder, Depth = 0, Expanded = false, Children = nil, HasKids = nil })
+    self.Nodes[#self.Nodes + 1] = {
+        Instance = nilFolder,
+        Depth = 0,
+        Expanded = false,
+        Children = nil,
+        HasKids = nil,
+    }
 end
 
 function Explorer:GetChildNodes(node)
-    if node.Children then return node.Children end
-    local children = {}
-  if node.Instance.Name == "Nil Instances" and node.Depth == 0 then
-    for _, inst in ipairs(getnil()) do
-        if inst ~= game then
-            table.insert(children, { Instance = inst, Depth = node.Depth + 1, Expanded = self._expandedNodes[inst] == true, Children = nil, HasKids = nil })
-        end
+    if node.Children then
+        return node.Children
     end
+    local children = {}
+    if node.Instance.Name == "Nil Instances" and node.Depth == 0 then
+        for _, inst in ipairs(getnil()) do
+            if inst ~= game then
+                children[#children + 1] = {
+                    Instance = inst,
+                    Depth = node.Depth + 1,
+                    Expanded = self._expandedNodes[inst] == true,
+                    Children = nil,
+                    HasKids = nil,
+                }
+            end
+        end
     else
-        local ok, list = pcall(function() return node.Instance:GetChildren() end)
+        local ok, list = pcall(function()
+            return node.Instance:GetChildren()
+        end)
         if ok and list then
             for _, inst in ipairs(list) do
-                table.insert(children, { Instance = inst, Depth = node.Depth + 1, Expanded = self._expandedNodes[inst] == true, Children = nil, HasKids = nil })
+                children[#children + 1] = {
+                    Instance = inst,
+                    Depth = node.Depth + 1,
+                    Expanded = self._expandedNodes[inst] == true,
+                    Children = nil,
+                    HasKids = nil,
+                }
             end
         end
         self:ConnectNode(node.Instance)
@@ -2061,7 +2435,9 @@ function Explorer:GetChildNodes(node)
     table.sort(children, function(a, b)
         local orderA = ServiceOrder[a.Instance.ClassName] or ServiceOrder[a.Instance.Name] or 99
         local orderB = ServiceOrder[b.Instance.ClassName] or ServiceOrder[b.Instance.Name] or 99
-        if orderA == orderB then return a.Instance.Name < b.Instance.Name end
+        if orderA == orderB then
+            return a.Instance.Name < b.Instance.Name
+        end
         return orderA < orderB
     end)
     node.Children = children
@@ -2072,7 +2448,7 @@ end
 function Explorer:Flatten()
     self.Flat = {}
     local function walk(node)
-        table.insert(self.Flat, node)
+        self.Flat[#self.Flat + 1] = node
         if node.Expanded then
             for _, child in ipairs(self:GetChildNodes(node)) do
                 walk(child)
@@ -2087,64 +2463,130 @@ end
 function Explorer:UpdateTree()
     self:Flatten()
     self.TreeScroll.CanvasSize = UDim2.new(0, 0, 0, #self.Flat * ROW_H)
+    for _, row in ipairs(self.TreeRows) do
+        row.Idx = 0
+    end
     self:RenderTree()
+end
+
+function Explorer:PopulateTreeRow(row, node, nodeIdx)
+    row.Idx = nodeIdx
+    row.Frame.Visible = true
+    row.Frame.Position = UDim2.new(0, 0, 0, (nodeIdx - 1) * ROW_H)
+
+    local offset = node.Depth * 16
+    row.Expand.Position = UDim2.new(0, offset, 0, 3)
+    row.IconFrame.Position = UDim2.new(0, offset + 18, 0, 3)
+    row.Label.Position = UDim2.new(0, offset + 38, 0, 0)
+    row.Label.Size = UDim2.new(1, -(offset + 38), 1, 0)
+
+    if self:HasChildren(node) then
+        row.Expand.Text = if node.Expanded then "v" else ">"
+    else
+        row.Expand.Text = ""
+    end
+
+    local instName = ""
+    pcall(function()
+        instName = node.Instance.Name
+    end)
+    row.Label.Text = instName
+
+    local className = ""
+    pcall(function()
+        className = node.Instance.ClassName
+    end)
+    self:ApplyIcon(row.IconFrame, className)
 end
 
 function Explorer:RenderTree()
     local canvasY = self.TreeScroll.CanvasPosition.Y
     local windowY = self.TreeScroll.AbsoluteWindowSize.Y
-    if windowY <= 0 then windowY = 470 end
-    local startIdx = math.max(1, math.floor(canvasY / ROW_H))
-    local endIdx = math.min(#self.Flat, startIdx + math.ceil(windowY / ROW_H) + 2)
+    if windowY <= 0 then
+        windowY = 470
+    end
 
-    for idx, row in ipairs(self.TreeRows) do
-        local nodeIdx = startIdx + idx - 1
-        if nodeIdx >= 1 and nodeIdx <= endIdx and nodeIdx <= #self.Flat then
-            local node = self.Flat[nodeIdx]
-            row.Idx = nodeIdx
-            row.Frame.Visible = true
-            row.Frame.Position = UDim2.new(0, 0, 0, (nodeIdx - 1) * ROW_H)
-            local offset = node.Depth * 16
-            row.Expand.Position = UDim2.new(0, offset, 0, 3)
-            row.IconFrame.Position = UDim2.new(0, offset + 18, 0, 3)
-            row.Label.Position = UDim2.new(0, offset + 38, 0, 0)
-            row.Label.Size = UDim2.new(1, -(offset + 38), 1, 0)
-            if self:HasChildren(node) then
-                row.Expand.Text = if node.Expanded then "v" else ">"
-            else
-                row.Expand.Text = ""
+    local firstNeeded = math.max(1, math.floor(canvasY / ROW_H))
+    local lastNeeded = math.min(#self.Flat, math.ceil((canvasY + windowY) / ROW_H) + 1)
+
+    local needed = {}
+    for ni = firstNeeded, lastNeeded do
+        needed[ni] = true
+    end
+
+    local assigned = {}
+    for _, row in ipairs(self.TreeRows) do
+        if row.Idx >= 1 and needed[row.Idx] then
+            assigned[row.Idx] = row
+        end
+    end
+
+    local freePool = {}
+    for _, row in ipairs(self.TreeRows) do
+        if row.Idx == 0 or (row.Idx >= 1 and not needed[row.Idx]) then
+            if not assigned[row.Idx] then
+                row.Frame.Visible = false
+                row.Idx = 0
+                row.Hovered = false
+                freePool[#freePool + 1] = row
             end
-            local instName = ""
-            pcall(function() instName = node.Instance.Name end)
-            safeSetText(row.Label, instName)
-            local className = ""
-            pcall(function() className = node.Instance.ClassName end)
-            self:ApplyIcon(row.IconFrame, className)
-            if self.Selected == node.Instance then
+        end
+    end
+
+    for _, row in ipairs(self.TreeRows) do
+        if row.Idx >= 1 and not needed[row.Idx] and not assigned[row.Idx] then
+            row.Frame.Visible = false
+            row.Idx = 0
+            row.Hovered = false
+            freePool[#freePool + 1] = row
+        end
+    end
+
+    local fi = 1
+    for ni = firstNeeded, lastNeeded do
+        if ni >= 1 and ni <= #self.Flat and not assigned[ni] then
+            if fi <= #freePool then
+                local row = freePool[fi]
+                fi += 1
+                local node = self.Flat[ni]
+                self:PopulateTreeRow(row, node, ni)
+                assigned[ni] = row
+            end
+        end
+    end
+
+    for ni = firstNeeded, lastNeeded do
+        local row = assigned[ni]
+        if row and ni >= 1 and ni <= #self.Flat then
+            local node = self.Flat[ni]
+            row.Frame.Position = UDim2.new(0, 0, 0, (ni - 1) * ROW_H)
+            if self:IsSelected(node.Instance) then
                 row.Frame.BackgroundColor3 = Theme.Hi
                 row.Label.TextColor3 = Color3.new(1, 1, 1)
             else
                 row.Frame.BackgroundColor3 = if row.Hovered then Theme.Hv else Theme.Bg
                 row.Label.TextColor3 = Theme.Tx
             end
-        else
-            row.Frame.Visible = false
-            row.Idx = 0
         end
     end
 end
 
 function Explorer:FmtProp(row)
-    if row.Idx < 1 or row.Idx > #self.Props or not self.Selected then return end
+    local primary = self:GetPrimarySelected()
+    if row.Idx < 1 or row.Idx > #self.Props or not primary then
+        return
+    end
     local prop = self.Props[row.Idx]
-    local ok, val = pcall(function() return self.Selected[prop.Name] end)
+    local ok, val = pcall(function()
+        return primary[prop.Name]
+    end)
     if not ok then
         row.Checkbox.Visible = false
         row.ColorBtn.Visible = false
         row.Input.Visible = true
         row.Input.Size = UDim2.new(0.6, -12, 1, -6)
         row.Input.Position = UDim2.new(0.4, 0, 0, 3)
-        safeSetText(row.Input, "<error>")
+        row.Input.Text = "<error>"
         row.Input.TextColor3 = Theme.Err
         return
     end
@@ -2169,7 +2611,7 @@ function Explorer:FmtProp(row)
         row.Input.Size = UDim2.new(0.6, -34, 1, -6)
         row.Input.Position = UDim2.new(0.4, 24, 0, 3)
         row.Input.TextColor3 = Theme.Tx
-        safeSetText(row.Input, val.Name)
+        row.Input.Text = val.Name
         return
     end
     row.Checkbox.Visible = false
@@ -2179,7 +2621,7 @@ function Explorer:FmtProp(row)
     row.Input.Position = UDim2.new(0.4, 0, 0, 3)
     row.Input.TextColor3 = Theme.Tx
     local valType = typeof(val)
-    local displayText = ""
+    local displayText
     if valType == "Color3" then
         displayText = ("%d, %d, %d"):format(math.round(val.R * 255), math.round(val.G * 255), math.round(val.B * 255))
     elseif valType == "Vector3" then
@@ -2195,31 +2637,49 @@ function Explorer:FmtProp(row)
     else
         displayText = tostring(val)
     end
-    safeSetText(row.Input, displayText)
+    row.Input.Text = displayText
 end
 
 function Explorer:LoadProperties(inst)
+    if not inst then
+        self:ClearProps()
+        return
+    end
     for _, conn in ipairs(self.PropConns) do
-        pcall(function() conn:Disconnect() end)
+        pcall(function()
+            conn:Disconnect()
+        end)
     end
     self.PropConns = {}
     self:HideColorPicker()
+
     local className = ""
-    pcall(function() className = inst.ClassName end)
+    pcall(function()
+        className = inst.ClassName
+    end)
     local allProps = self:GetProps(className)
     local validProps = {}
     for _, prop in ipairs(allProps) do
-        local readable = pcall(function() local _ = inst[prop.Name] end)
+        local readable = pcall(function()
+            local _ = inst[prop.Name]
+        end)
         if readable then
-            table.insert(validProps, prop)
+            validProps[#validProps + 1] = prop
         end
     end
     self.Props = validProps
-    for _, row in ipairs(self.PropRows) do row.Idx = 0 end
+
+    for _, row in ipairs(self.PropRows) do
+        row.Idx = 0
+        row.Frame.Visible = false
+    end
+
     for propIdx, prop in ipairs(validProps) do
         local connOk, conn = pcall(function()
             return inst:GetPropertyChangedSignal(prop.Name):Connect(function()
-                if self.Selected ~= inst then return end
+                if self:GetPrimarySelected() ~= inst then
+                    return
+                end
                 for _, row in ipairs(self.PropRows) do
                     if row.Frame.Visible and row.Idx == propIdx then
                         self:FmtProp(row)
@@ -2229,99 +2689,174 @@ function Explorer:LoadProperties(inst)
             end)
         end)
         if connOk and conn then
-            table.insert(self.PropConns, conn)
+            self.PropConns[#self.PropConns + 1] = conn
         end
     end
+
     self.PropScroll.CanvasSize = UDim2.new(0, 0, 0, #self.Props * PROP_H)
     self.PropScroll.CanvasPosition = Vector2.zero
     self:RenderProps()
+
+    task.defer(function()
+        if self:GetPrimarySelected() == inst and #self.Props > 0 then
+            self:RenderProps()
+        end
+    end)
 end
 
 function Explorer:RenderProps()
-    if not self.Selected then
+    local primary = self:GetPrimarySelected()
+    if not primary or #self.Props == 0 then
         for _, row in ipairs(self.PropRows) do
             row.Frame.Visible = false
             row.Idx = 0
         end
         return
     end
+
     local canvasY = self.PropScroll.CanvasPosition.Y
     local windowY = self.PropScroll.AbsoluteWindowSize.Y
-    if windowY <= 0 then windowY = 470 end
-    local startIdx = math.max(1, math.floor(canvasY / PROP_H))
-    local endIdx = math.min(#self.Props, startIdx + math.ceil(windowY / PROP_H) + 2)
-    for idx, row in ipairs(self.PropRows) do
-        local propIdx = startIdx + idx - 1
-        if propIdx >= 1 and propIdx <= endIdx and propIdx <= #self.Props then
-            row.Frame.Position = UDim2.new(0, 0, 0, (propIdx - 1) * PROP_H)
-            if row.Idx ~= propIdx then
-                row.Idx = propIdx
-                row.Frame.BackgroundColor3 = if propIdx % 2 == 0 then Theme.Sf else Theme.Bg
-                safeSetText(row.Name, self.Props[propIdx].Name)
-                self:FmtProp(row)
-            end
-            row.Frame.Visible = true
-        else
+    if windowY <= 0 then
+        windowY = 470
+    end
+
+    local firstNeeded = math.max(1, math.floor(canvasY / PROP_H))
+    local lastNeeded = math.min(#self.Props, math.ceil((canvasY + windowY) / PROP_H) + 1)
+
+    local needed = {}
+    for ni = firstNeeded, lastNeeded do
+        needed[ni] = true
+    end
+
+    local assigned = {}
+    for _, row in ipairs(self.PropRows) do
+        if row.Idx >= 1 and needed[row.Idx] then
+            assigned[row.Idx] = row
+        end
+    end
+
+    local freePool = {}
+    for _, row in ipairs(self.PropRows) do
+        if row.Idx >= 1 and not needed[row.Idx] then
             row.Frame.Visible = false
             row.Idx = 0
+            freePool[#freePool + 1] = row
+        elseif row.Idx == 0 then
+            row.Frame.Visible = false
+            freePool[#freePool + 1] = row
+        end
+    end
+
+    local fi = 1
+    for ni = firstNeeded, lastNeeded do
+        if ni >= 1 and ni <= #self.Props and not assigned[ni] then
+            if fi <= #freePool then
+                local row = freePool[fi]
+                fi += 1
+                row.Idx = ni
+                row.Frame.Position = UDim2.new(0, 0, 0, (ni - 1) * PROP_H)
+                row.Frame.BackgroundColor3 = if ni % 2 == 0 then Theme.Sf else Theme.Bg
+                row.Name.Text = self.Props[ni].Name
+                self:FmtProp(row)
+                row.Frame.Visible = true
+                assigned[ni] = row
+            end
+        end
+    end
+
+    for ni = firstNeeded, lastNeeded do
+        local row = assigned[ni]
+        if row and row.Frame.Visible then
+            row.Frame.Position = UDim2.new(0, 0, 0, (ni - 1) * PROP_H)
         end
     end
 end
 
-function Explorer:MakeLineNums(src)
-    local count = 1
-    for _ in src:gmatch("\n") do count += 1 end
-    local width = #tostring(count)
-    local lines = {}
-    for i = 1, count do
-        local numStr = tostring(i)
-        table.insert(lines, (" "):rep(width - #numStr) .. numStr)
-    end
-    return table.concat(lines, "\n")
-end
-
 function Explorer:OpenScript(inst)
-    if not inst:IsA("LuaSourceContainer") then return end
+    if not inst:IsA("LuaSourceContainer") then
+        return
+    end
     self._currentScriptInst = inst
     self._viewMode = "decompile"
     self.DumpBtn.Text = "Dump"
+
     local name = ""
-    pcall(function() name = inst.Name end)
-    safeSetText(self.ScriptTitle, name .. " — Script Viewer")
+    pcall(function()
+        name = inst.Name
+    end)
+    self.ScriptTitle.Text = name .. " — Script Viewer"
     self.ScriptWin.Visible = true
     self.RawSource = ""
-    safeSetText(self.GutterLabel, " 1")
-    safeSetText(self.CodeLabel, '<font color="#5C6370">-- Decompiling...</font>')
+    self:SetViewerError('<font color="#5C6370">-- Decompiling...</font>')
+
     task.spawn(function()
         local ok, src = pcall(decompile_func, inst)
         if ok and type(src) == "string" and #src > 0 then
             self.RawSource = src
-            if #src > 100000 then
-                src = src:sub(1, 100000) .. "\n\n-- [Truncated]"
+            local okHl, hlLines = pcall(function()
+                return self.HL:RunLines(src)
+            end)
+            if okHl and hlLines then
+                self:SetViewerContent(hlLines)
+            else
+                local plainLines = splitLines(src)
+                local escaped = {}
+                for i, line in ipairs(plainLines) do
+                    escaped[i] = line:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+                end
+                self:SetViewerContent(escaped)
             end
-            safeSetText(self.GutterLabel, self:MakeLineNums(src))
-            pcall(function() safeSetText(self.CodeLabel, self.HL:Run(src)) end)
         else
             self.RawSource = ""
-            safeSetText(self.GutterLabel, " 1")
-            pcall(function()
-                safeSetText(self.CodeLabel, '<font color="#E06C75">-- Decompile failed\n-- ' .. tostring(src) .. "</font>")
-            end)
+            self:SetViewerError(
+                '<font color="#E06C75">-- Decompile failed\n-- ' .. tostring(src) .. "</font>"
+            )
         end
     end)
 end
 
 function Explorer:SaveScript(inst)
-    if not inst:IsA("LuaSourceContainer") or not writefile then return end
+    if not inst:IsA("LuaSourceContainer") or not writefile then
+        return
+    end
     ensureSaveFolder()
     local name = ""
-    pcall(function() name = inst.Name end)
+    pcall(function()
+        name = inst.Name
+    end)
     local safeName = name:gsub("[^%w_%-]", "_")
-    if safeName == "" then safeName = "script" end
+    if safeName == "" then
+        safeName = "script"
+    end
     task.spawn(function()
         local ok, src = pcall(decompile_func, inst)
         if ok and type(src) == "string" and #src > 0 then
-            pcall(function() writefile("BlatantExplorer/Saved/" .. safeName .. ".lua", src) end)
+            pcall(function()
+                writefile("BlatantExplorer/Saved/" .. safeName .. ".lua", src)
+            end)
+        end
+    end)
+end
+
+function Explorer:SaveBytecode(inst)
+    if not inst:IsA("LuaSourceContainer") or not writefile then
+        return
+    end
+    ensureSaveFolder()
+    local name = ""
+    pcall(function()
+        name = inst.Name
+    end)
+    local safeName = name:gsub("[^%w_%-]", "_")
+    if safeName == "" then
+        safeName = "script"
+    end
+    task.spawn(function()
+        local ok, bytecode = pcall(getscriptbytecode_func, inst)
+        if ok and bytecode and #bytecode > 0 then
+            pcall(function()
+                writefile("BlatantExplorer/Saved/" .. safeName .. ".bytecode", bytecode)
+            end)
         end
     end)
 end
@@ -2332,9 +2867,10 @@ function Explorer:BuildDumpText(scriptInst)
     local dumped_functions = {}
     local function_count = 0
     local TAB = "    "
-
     local fullPath = ""
-    pcall(function() fullPath = scriptInst:GetFullName() end)
+    pcall(function()
+        fullPath = scriptInst:GetFullName()
+    end)
 
     local function add(str, indent, newLine)
         if newLine == nil then
@@ -2509,14 +3045,12 @@ function Explorer:BuildDumpText(scriptInst)
             for _, _function in pairs(getgc()) do
                 if typeof(_function) == "function" then
                     local matched = false
-
                     pcall(function()
                         local env = getfenv(_function)
                         if env and env.script and env.script == scriptInst then
                             matched = true
                         end
                     end)
-
                     if not matched then
                         pcall(function()
                             local isL = islc(_function)
@@ -2544,7 +3078,6 @@ function Explorer:BuildDumpText(scriptInst)
                             end
                         end)
                     end
-
                     if matched then
                         pcall(function()
                             dumpFunction(_function, 0)
@@ -2564,40 +3097,38 @@ function Explorer:BuildDumpText(scriptInst)
     return dump, function_count
 end
 
-function Explorer:FormatDumpRichText(text)
-    local lines = text:split("\n")
-    local parts = {}
-
-    for _, line in ipairs(lines) do
+function Explorer:FormatDumpLines(text)
+    local rawLines = splitLines(text)
+    local result = {}
+    for _, line in ipairs(rawLines) do
         local escaped = line:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
-
         if line:match("^%-%-") or line:match("^%-%-%[%[") or line:match("^%]%]") then
-            parts[#parts + 1] = '<font color="#5C6370">' .. escaped .. "</font>"
+            result[#result + 1] = '<font color="#5C6370">' .. escaped .. "</font>"
         elseif line:match("Function Dump:") then
-            parts[#parts + 1] = '<font color="#61AFEF"><b>' .. escaped .. "</b></font>"
+            result[#result + 1] = '<font color="#61AFEF"><b>' .. escaped .. "</b></font>"
         elseif line:match("Function Upvalues:") then
-            parts[#parts + 1] = '<font color="#C678DD"><b>' .. escaped .. "</b></font>"
+            result[#result + 1] = '<font color="#C678DD"><b>' .. escaped .. "</b></font>"
         elseif line:match("Function Constants:") then
-            parts[#parts + 1] = '<font color="#C678DD"><b>' .. escaped .. "</b></font>"
+            result[#result + 1] = '<font color="#C678DD"><b>' .. escaped .. "</b></font>"
         elseif line:match("Function Protos:") then
-            parts[#parts + 1] = '<font color="#C678DD"><b>' .. escaped .. "</b></font>"
+            result[#result + 1] = '<font color="#C678DD"><b>' .. escaped .. "</b></font>"
         elseif line:match("%[function%]") then
-            parts[#parts + 1] = '<font color="#61AFEF">' .. escaped .. "</font>"
+            result[#result + 1] = '<font color="#61AFEF">' .. escaped .. "</font>"
         elseif line:match("%[table%]") then
-            parts[#parts + 1] = '<font color="#D19A66">' .. escaped .. "</font>"
+            result[#result + 1] = '<font color="#D19A66">' .. escaped .. "</font>"
         elseif line:match("const%[") or line:match("upval%[") then
             local pre, idx, rest = escaped:match("^(%s*)(%S+%[%d+%])(.*)")
             if pre then
-                parts[#parts + 1] = pre .. '<font color="#D19A66">' .. idx .. '</font><font color="#ABB2BF">' .. rest .. "</font>"
+                result[#result + 1] = pre .. '<font color="#D19A66">' .. idx .. '</font><font color="#ABB2BF">' .. rest .. "</font>"
             else
-                parts[#parts + 1] = '<font color="#ABB2BF">' .. escaped .. "</font>"
+                result[#result + 1] = '<font color="#ABB2BF">' .. escaped .. "</font>"
             end
         elseif line:match("^%s+%d+ %[") then
             local pre, idx, rest = escaped:match("^(%s*)(%d+ %[%S+%])(.*)")
             if pre then
-                parts[#parts + 1] = pre .. '<font color="#D19A66">' .. idx .. '</font><font color="#ABB2BF">' .. rest .. "</font>"
+                result[#result + 1] = pre .. '<font color="#D19A66">' .. idx .. '</font><font color="#ABB2BF">' .. rest .. "</font>"
             else
-                parts[#parts + 1] = '<font color="#ABB2BF">' .. escaped .. "</font>"
+                result[#result + 1] = '<font color="#ABB2BF">' .. escaped .. "</font>"
             end
         elseif line:match("^%s+Name:") or line:match("^%s+Source:")
             or line:match("^%s+Line") or line:match("^%s+Current Line")
@@ -2606,20 +3137,19 @@ function Explorer:FormatDumpRichText(text)
             or line:match("^%s+Short Source:") or line:match("^%s+Upvalue Count:") then
             local label, val = escaped:match("^(%s+%S+:)(.*)")
             if label then
-                parts[#parts + 1] = '<font color="#98C379">' .. label .. '</font><font color="#ABB2BF">' .. val .. "</font>"
+                result[#result + 1] = '<font color="#98C379">' .. label .. '</font><font color="#ABB2BF">' .. val .. "</font>"
             else
-                parts[#parts + 1] = '<font color="#ABB2BF">' .. escaped .. "</font>"
+                result[#result + 1] = '<font color="#ABB2BF">' .. escaped .. "</font>"
             end
         elseif line:match("already dumped") then
-            parts[#parts + 1] = '<font color="#5C6370">' .. escaped .. "</font>"
+            result[#result + 1] = '<font color="#5C6370">' .. escaped .. "</font>"
         elseif line:match("%(") and line:match("%)") then
-            parts[#parts + 1] = '<font color="#5C6370">' .. escaped .. "</font>"
+            result[#result + 1] = '<font color="#5C6370">' .. escaped .. "</font>"
         else
-            parts[#parts + 1] = '<font color="#ABB2BF">' .. escaped .. "</font>"
+            result[#result + 1] = '<font color="#ABB2BF">' .. escaped .. "</font>"
         end
     end
-
-    return table.concat(parts, "\n")
+    return result
 end
 
 function Explorer:DumpScript(inst)
@@ -2631,17 +3161,16 @@ function Explorer:DumpScript(inst)
     self.DumpBtn.Text = "Decompile"
 
     local name = ""
-    pcall(function() name = inst.Name end)
-
-    safeSetText(self.ScriptTitle, name .. " — Dump")
+    pcall(function()
+        name = inst.Name
+    end)
+    self.ScriptTitle.Text = name .. " — Dump"
     self.ScriptWin.Visible = true
     self.RawSource = ""
-    safeSetText(self.GutterLabel, " 1")
-    safeSetText(self.CodeLabel, '<font color="#5C6370">-- Analyzing...</font>')
+    self:SetViewerError('<font color="#5C6370">-- Analyzing...</font>')
 
     task.spawn(function()
         local dumpText, funcCount = self:BuildDumpText(inst)
-
         local decompSrc = ""
         local okD, src = pcall(decompile_func, inst)
         if okD and type(src) == "string" and #src > 0 then
@@ -2654,40 +3183,36 @@ function Explorer:DumpScript(inst)
         else
             finalText = dumpText
         end
-
         self.RawSource = finalText
-        safeSetText(self.GutterLabel, self:MakeLineNums(finalText))
 
-        local okRich, richText = pcall(function()
-            if #decompSrc > 0 then
-                local hlSrc = self.HL:Run(decompSrc)
-                local hlDump = self:FormatDumpRichText(dumpText)
-                return hlSrc .. "\n\n" .. hlDump
-            else
-                return self:FormatDumpRichText(dumpText)
-            end
-        end)
-
-        if okRich then
-            local okSet = pcall(function()
-                safeSetText(self.CodeLabel, richText)
+        local allHlLines = {}
+        if #decompSrc > 0 then
+            local okHl, srcHlLines = pcall(function()
+                return self.HL:RunLines(decompSrc)
             end)
-            if not okSet then
-                ensureSaveFolder()
-                local safeName = name:gsub("[^%w_%-]", "_")
-                if safeName == "" then
-                    safeName = "dump"
+            if okHl and srcHlLines then
+                for _, line in ipairs(srcHlLines) do
+                    allHlLines[#allHlLines + 1] = line
                 end
-                pcall(function()
-                    if writefile then
-                        writefile("BlatantExplorer/Saved/" .. safeName .. "_dump.txt", finalText)
-                    end
-                end)
-                safeSetText(self.CodeLabel,
-                    '<font color="#E06C75">-- Dump too large to display\n-- Auto-saved to BlatantExplorer/Saved/'
-                    .. safeName .. '_dump.txt</font>')
+            else
+                local plainLines = splitLines(decompSrc)
+                for _, line in ipairs(plainLines) do
+                    allHlLines[#allHlLines + 1] = line:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+                end
             end
-        else
+            allHlLines[#allHlLines + 1] = ""
+            allHlLines[#allHlLines + 1] = ""
+        end
+
+        local dumpHlLines = self:FormatDumpLines(dumpText)
+        for _, line in ipairs(dumpHlLines) do
+            allHlLines[#allHlLines + 1] = line
+        end
+
+        local okSet = pcall(function()
+            self:SetViewerContent(allHlLines)
+        end)
+        if not okSet then
             ensureSaveFolder()
             local safeName = name:gsub("[^%w_%-]", "_")
             if safeName == "" then
@@ -2698,9 +3223,10 @@ function Explorer:DumpScript(inst)
                     writefile("BlatantExplorer/Saved/" .. safeName .. "_dump.txt", finalText)
                 end
             end)
-            safeSetText(self.CodeLabel,
-                '<font color="#E06C75">-- Dump formatting failed\n-- Auto-saved to BlatantExplorer/Saved/'
-                .. safeName .. '_dump.txt</font>')
+            self:SetViewerError(
+                '<font color="#E06C75">-- Dump too large to display\n-- Auto-saved to BlatantExplorer/Saved/'
+                .. safeName .. '_dump.txt</font>'
+            )
         end
     end)
 end
