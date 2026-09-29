@@ -1,3 +1,10 @@
+if getgenv().BlatantExplorer then
+    pcall(function()
+        getgenv().BlatantExplorer:Destroy()
+    end)
+    getgenv().BlatantExplorer = nil
+end
+
 local compare_func = compareinstances or function(a, b)
     return a == b
 end
@@ -45,26 +52,6 @@ local function WeakGetChildren(inst)
         end
     end
     return out
-end
-
-local function getPathArray(inst)
-    local arr = {}
-    local curr = inst
-    while curr and curr ~= game do
-        local okName, name = pcall(function() return curr.Name end)
-        if okName and name then
-            table.insert(arr, 1, name)
-        else
-            break
-        end
-        local okParent, parent = pcall(function() return curr.Parent end)
-        if okParent then
-            curr = parent
-        else
-            break
-        end
-    end
-    return arr
 end
 
 local RBXJanitor = {}
@@ -867,6 +854,9 @@ function Explorer.new()
     self._searchQuery = ""
     self.SearchIndex = {}
     self.SearchIndexBuilt = false
+    self._searchConns = {}
+    self._resolvedInstances = setmetatable({}, { __mode = "v" })
+    self._searchEntryByInst = setmetatable({}, { __mode = "k" })
 
     initIconMapAsset()
     self:FetchAPI()
@@ -907,18 +897,18 @@ function Explorer:BuildSearchIndex()
     local idx = {}
     local count = 0
 
-    local function indexItem(inst, isNil)
+    local function indexItem(inst, isNil, parentEntry)
         if not inst then
-            return
+            return nil
         end
         local okN, name = pcall(function() return inst.Name end)
         local okC, className = pcall(function() return inst.ClassName end)
         if okN and okC and name and className then
             count += 1
-            idx[count] = {
+            local entry = {
                 Name = name,
                 ClassName = className,
-                PathArray = if not isNil then getPathArray(inst) else nil,
+                ParentEntry = parentEntry,
                 IsNil = isNil,
                 Depth = 0,
                 Expanded = false,
@@ -926,19 +916,25 @@ function Explorer:BuildSearchIndex()
                 HasKids = false,
                 IsLazy = true,
             }
+            idx[count] = entry
+            self._searchEntryByInst[inst] = entry
+            return entry
         end
+        return nil
     end
 
     local roots = WeakGetChildren(game)
     for _, svc in roots do
         if svc then
-            indexItem(svc, false)
+            local svcEntry = indexItem(svc, false, nil)
             local okDesc, desc = pcall(svc.GetDescendants, svc)
             if okDesc and type(desc) == "table" then
                 setmetatable(desc, { __mode = "v" })
                 for _, d in desc do
                     if d then
-                        indexItem(d, false)
+                        local okP, p = pcall(function() return d.Parent end)
+                        local pEntry = (okP and p and self._searchEntryByInst[p]) or svcEntry
+                        indexItem(d, false, pEntry)
                     end
                 end
             end
@@ -948,12 +944,75 @@ function Explorer:BuildSearchIndex()
     local nilList = getnil()
     for _, inst in nilList do
         if inst and inst ~= game then
-            indexItem(inst, true)
+            indexItem(inst, true, nil)
         end
     end
 
     self.SearchIndex = idx
     self.SearchIndexBuilt = true
+    self:HookSearchIndexEvents()
+end
+
+function Explorer:HookSearchIndexEvents()
+    local safeGame = cloneref(game)
+    local okAdd, cAdd = pcall(function()
+        return safeGame.DescendantAdded:Connect(function(child)
+            if not self._alive or not self.SearchIndexBuilt then
+                return
+            end
+            local okN, name = pcall(function() return child.Name end)
+            local okC, className = pcall(function() return child.ClassName end)
+            if okN and okC and name and className then
+                local pEntry = nil
+                local okP, parent = pcall(function() return child.Parent end)
+                if okP and parent then
+                    pEntry = self._searchEntryByInst[parent]
+                end
+                local entry = {
+                    Name = name,
+                    ClassName = className,
+                    ParentEntry = pEntry,
+                    IsNil = false,
+                    Depth = 0,
+                    Expanded = false,
+                    Children = nil,
+                    HasKids = false,
+                    IsLazy = true,
+                }
+                table.insert(self.SearchIndex, entry)
+                self._searchEntryByInst[child] = entry
+                if self._searchQuery ~= "" then
+                    self:ScheduleUpdate()
+                end
+            end
+        end)
+    end)
+    if okAdd and cAdd then
+        self._searchConns[#self._searchConns + 1] = cAdd
+    end
+
+    local okRem, cRem = pcall(function()
+        return safeGame.DescendantRemoving:Connect(function(child)
+            if not self._alive or not self.SearchIndexBuilt then
+                return
+            end
+            local entry = self._searchEntryByInst[child]
+            if entry then
+                self._searchEntryByInst[child] = nil
+                self._resolvedInstances[entry] = nil
+                local idx = table.find(self.SearchIndex, entry)
+                if idx then
+                    table.remove(self.SearchIndex, idx)
+                end
+                if self._searchQuery ~= "" then
+                    self:ScheduleUpdate()
+                end
+            end
+        end)
+    end)
+    if okRem and cRem then
+        self._searchConns[#self._searchConns + 1] = cRem
+    end
 end
 
 function Explorer:ResolveNode(node)
@@ -963,8 +1022,10 @@ function Explorer:ResolveNode(node)
     if not node.IsLazy then
         return node.Instance
     end
-    if node.ResolvedInstance and self:IsSelected(node.ResolvedInstance) then
-        return node.ResolvedInstance
+
+    local cached = self._resolvedInstances[node]
+    if cached and self:IsSelected(cached) then
+        return cached
     end
 
     local inst = nil
@@ -979,8 +1040,14 @@ function Explorer:ResolveNode(node)
             end
         end
     else
-        local parts = node.PathArray
-        if parts and #parts > 0 then
+        local parts = {}
+        local curr = node
+        while curr do
+            table.insert(parts, 1, curr.Name)
+            curr = curr.ParentEntry
+        end
+
+        if #parts > 0 then
             local current = nil
             local okSvc, svc = pcall(game.GetService, game, parts[1])
             if okSvc and svc then
@@ -1009,7 +1076,7 @@ function Explorer:ResolveNode(node)
 
     if inst then
         local safe = cloneref(inst)
-        node.ResolvedInstance = safe
+        self._resolvedInstances[node] = safe
         return safe
     end
     return nil
@@ -1019,7 +1086,7 @@ function Explorer:GetNodeInstance(node)
     if not node then
         return nil
     end
-    return node.Instance or node.ResolvedInstance
+    return node.Instance or self._resolvedInstances[node]
 end
 
 function Explorer:IsNodeSelected(node)
@@ -1091,6 +1158,14 @@ function Explorer:Destroy()
         pcall(function()
             self._heartbeatConn:Disconnect()
         end)
+    end
+    if self._searchConns then
+        for _, conn in self._searchConns do
+            pcall(function()
+                conn:Disconnect()
+            end)
+        end
+        self._searchConns = {}
     end
     if self.Gui then
         pcall(function()
