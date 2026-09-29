@@ -1,31 +1,128 @@
-loadstring(game:HttpGet("https://raw.githubusercontent.com/TesterTD/BlatantExplorer/refs/heads/main/PatchUtility.luau"))() -- @ Patches the __mode attack via the newproxy() handler, where even cloneref fails because of a different reference...
-
-if getgenv().BlatantExplorer then
-    pcall(function()
-        getgenv().BlatantExplorer:Destroy()
-    end)
-    getgenv().BlatantExplorer = nil
-    pcall(function()
-        game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title = "BlatantExplorer",
-            Text = "BlatantExplorer already started! Try again...",
-            Duration = 3,
-        })
-    end)
-    return
+local compare_func = compareinstances or function(a, b)
+    return a == b
 end
 
-local Services = setmetatable({}, {
-    __index = function(self, name)
-        local ok, svc = pcall(game.GetService, game, name)
-        if ok and svc then
-            local ref = cloneref(svc)
-            rawset(self, name, ref)
-            return ref
+local function safeTostring(val)
+    local t = type(val)
+    if t == "table" or t == "userdata" then
+        local mt = getrawmetatable(val)
+        if type(mt) == "table" and rawget(mt, "__tostring") ~= nil then
+            local ok, ptr = pcall(string.format, "%p", val)
+            if ok and ptr and not ptr:find("%", 1, true) then
+                return t .. ": " .. ptr
+            end
+            local old = rawget(mt, "__tostring")
+            local ro = isreadonly(mt)
+            if ro then
+                setreadonly(mt, false)
+            end
+            rawset(mt, "__tostring", nil)
+            local str = tostring(val)
+            rawset(mt, "__tostring", old)
+            if ro then
+                setreadonly(mt, true)
+            end
+            return str
         end
-        return nil
-    end,
-})
+    end
+    return tostring(val)
+end
+
+local RBXJanitor = {}
+RBXJanitor.__index = RBXJanitor
+
+function RBXJanitor.new()
+    local self = {
+        _tasks = {},
+        _isCleaning = false,
+    }
+    return setmetatable(self, RBXJanitor)
+end
+
+function RBXJanitor:Add(item, methodName)
+    if not item then
+        return item
+    end
+    table.insert(self._tasks, { item = item, method = methodName })
+    return item
+end
+
+function RBXJanitor:Remove(item)
+    for index = #self._tasks, 1, -1 do
+        if self._tasks[index].item == item then
+            table.remove(self._tasks, index)
+            break
+        end
+    end
+end
+
+function RBXJanitor:Cleanup()
+    if self._isCleaning then
+        return
+    end
+    self._isCleaning = true
+    local tasks = self._tasks
+    self._tasks = {}
+
+    for _, taskData in tasks do
+        local item = taskData.item
+        local method = taskData.method
+
+        pcall(function()
+            if typeof(item) == "RBXScriptConnection" then
+                item:Disconnect()
+            elseif typeof(item) == "Instance" then
+                item:Destroy()
+            elseif type(item) == "thread" then
+                task.cancel(item)
+            elseif type(item) == "function" then
+                item()
+            elseif type(item) == "table" then
+                if method and type(item[method]) == "function" then
+                    item[method](item)
+                elseif type(item.Destroy) == "function" then
+                    item:Destroy()
+                elseif type(item.Disconnect) == "function" then
+                    item:Disconnect()
+                elseif type(item.disconnect) == "function" then
+                    item:disconnect()
+                end
+            end
+        end)
+    end
+    self._isCleaning = false
+end
+
+function RBXJanitor:Destroy()
+    self:Cleanup()
+end
+
+local serviceProxyUserdata = newproxy(true)
+local serviceProxyMt = getmetatable(serviceProxyUserdata)
+local serviceBuffer = buffer.create(2048)
+local serviceBufferOffset = 0
+
+serviceProxyMt.__buffer = serviceBuffer
+serviceProxyMt.__userdata = serviceProxyUserdata
+serviceProxyMt.__index = function(_, name)
+    local ok, svc = pcall(game.GetService, game, name)
+    if ok and svc then
+        local nameStr = tostring(name)
+        local nameLen = #nameStr
+        if serviceBufferOffset + nameLen + 2 <= buffer.len(serviceBuffer) then
+            buffer.writeu16(serviceBuffer, serviceBufferOffset, nameLen)
+            buffer.writestring(serviceBuffer, serviceBufferOffset + 2, nameStr, nameLen)
+            serviceBufferOffset = serviceBufferOffset + nameLen + 2
+        end
+        return cloneref(svc)
+    end
+    return nil
+end
+serviceProxyMt.__tostring = function()
+    return "ServicesProxy"
+end
+
+local Services = setmetatable({}, serviceProxyMt)
 
 local HttpService = Services.HttpService
 local UserInputService = Services.UserInputService
@@ -37,7 +134,7 @@ local RunService = Services.RunService
 
 local getnil = getnilinstances or function() return {} end
 local gethui_func = gethui or function() return Services.CoreGui end
-local decompile_func = decompile or function() return "-- Decompiler not supported" end
+local decompile_func = decompile or function() return "Decompiler not supported" end
 local islc = islclosure or function() return false end
 local getupvalues_func = (debug and debug.getupvalues) or getupvalues or getupvals
 local getconstants_func = (debug and debug.getconstants) or getconstants or getconsts
@@ -351,7 +448,7 @@ local ServiceOrder = {
 local function new(class, props)
     local inst = Instance.new(class)
     if props then
-        for k, v in pairs(props) do
+        for k, v in props do
             if k == "Parent" then
                 continue
             end
@@ -367,12 +464,12 @@ end
 local function uid()
     local rng = Random.new()
     local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-    local out = ""
-    for _ = 1, 32 do
+    local b = buffer.create(32)
+    for i = 0, 31 do
         local r = rng:NextInteger(1, #chars)
-        out ..= chars:sub(r, r)
+        buffer.writeu8(b, i, string.byte(chars, r))
     end
-    return out
+    return buffer.tostring(b)
 end
 
 local function splitLines(str)
@@ -444,9 +541,10 @@ function Highlighter.new()
 end
 
 function Highlighter:Tokenize(src)
-    local tokens = {}
-    local i = 1
     local len = #src
+    local tokens = table.create(math.max(32, math.floor(len / 6)))
+    local tokenCount = 0
+    local i = 1
     while i <= len do
         local c = src:byte(i)
         if c == 45 and i < len and src:byte(i + 1) == 45 then
@@ -454,10 +552,12 @@ function Highlighter:Tokenize(src)
             if rest == "[[" then
                 local closePos = src:find("%]%]", i + 4, false)
                 if closePos then
-                    tokens[#tokens + 1] = { type = "comment", text = src:sub(i, closePos + 1) }
+                    tokenCount += 1
+                    tokens[tokenCount] = { type = "comment", text = src:sub(i, closePos + 1) }
                     i = closePos + 2
                 else
-                    tokens[#tokens + 1] = { type = "comment", text = src:sub(i) }
+                    tokenCount += 1
+                    tokens[tokenCount] = { type = "comment", text = src:sub(i) }
                     i = len + 1
                 end
             elseif rest:sub(1, 1) == "[" then
@@ -471,29 +571,35 @@ function Highlighter:Tokenize(src)
                     local closePattern = "%]" .. ("="):rep(eqCount) .. "%]"
                     local closePos = src:find(closePattern, j + 1, false)
                     if closePos then
-                        tokens[#tokens + 1] = { type = "comment", text = src:sub(i, closePos + eqCount + 1) }
+                        tokenCount += 1
+                        tokens[tokenCount] = { type = "comment", text = src:sub(i, closePos + eqCount + 1) }
                         i = closePos + eqCount + 2
                     else
-                        tokens[#tokens + 1] = { type = "comment", text = src:sub(i) }
+                        tokenCount += 1
+                        tokens[tokenCount] = { type = "comment", text = src:sub(i) }
                         i = len + 1
                     end
                 else
                     local nl = src:find("\n", i, true)
                     if nl then
-                        tokens[#tokens + 1] = { type = "comment", text = src:sub(i, nl - 1) }
+                        tokenCount += 1
+                        tokens[tokenCount] = { type = "comment", text = src:sub(i, nl - 1) }
                         i = nl
                     else
-                        tokens[#tokens + 1] = { type = "comment", text = src:sub(i) }
+                        tokenCount += 1
+                        tokens[tokenCount] = { type = "comment", text = src:sub(i) }
                         i = len + 1
                     end
                 end
             else
                 local nl = src:find("\n", i, true)
                 if nl then
-                    tokens[#tokens + 1] = { type = "comment", text = src:sub(i, nl - 1) }
+                    tokenCount += 1
+                    tokens[tokenCount] = { type = "comment", text = src:sub(i, nl - 1) }
                     i = nl
                 else
-                    tokens[#tokens + 1] = { type = "comment", text = src:sub(i) }
+                    tokenCount += 1
+                    tokens[tokenCount] = { type = "comment", text = src:sub(i) }
                     i = len + 1
                 end
             end
@@ -508,14 +614,17 @@ function Highlighter:Tokenize(src)
                 local closePattern = "%]" .. ("="):rep(eqCount) .. "%]"
                 local closePos = src:find(closePattern, j + 1, false)
                 if closePos then
-                    tokens[#tokens + 1] = { type = "string", text = src:sub(i, closePos + eqCount + 1) }
+                    tokenCount += 1
+                    tokens[tokenCount] = { type = "string", text = src:sub(i, closePos + eqCount + 1) }
                     i = closePos + eqCount + 2
                 else
-                    tokens[#tokens + 1] = { type = "string", text = src:sub(i) }
+                    tokenCount += 1
+                    tokens[tokenCount] = { type = "string", text = src:sub(i) }
                     i = len + 1
                 end
             else
-                tokens[#tokens + 1] = { type = "code", text = src:sub(i, i) }
+                tokenCount += 1
+                tokens[tokenCount] = { type = "code", text = src:sub(i, i) }
                 i = i + 1
             end
         elseif c == 34 or c == 39 then
@@ -534,10 +643,12 @@ function Highlighter:Tokenize(src)
                     j = j + 1
                 end
             end
-            tokens[#tokens + 1] = { type = "string", text = src:sub(i, j - 1) }
+            tokenCount += 1
+            tokens[tokenCount] = { type = "string", text = src:sub(i, j - 1) }
             i = j
         elseif c == 10 then
-            tokens[#tokens + 1] = { type = "newline", text = "\n" }
+            tokenCount += 1
+            tokens[tokenCount] = { type = "newline", text = "\n" }
             i = i + 1
         else
             local j = i + 1
@@ -548,7 +659,8 @@ function Highlighter:Tokenize(src)
                 end
                 j = j + 1
             end
-            tokens[#tokens + 1] = { type = "code", text = src:sub(i, j - 1) }
+            tokenCount += 1
+            tokens[tokenCount] = { type = "code", text = src:sub(i, j - 1) }
             i = j
         end
     end
@@ -607,8 +719,8 @@ end
 
 function Highlighter:Run(source)
     local tokens = self:Tokenize(source)
-    local parts = {}
-    for _, tok in ipairs(tokens) do
+    local parts = table.create(#tokens)
+    for _, tok in tokens do
         local escaped = tok.text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
         if tok.type == "comment" then
             parts[#parts + 1] = '<font color="#5C6370">' .. escaped .. "</font>"
@@ -625,7 +737,7 @@ end
 
 function Highlighter:RunLines(source)
     local tokens = self:Tokenize(source)
-    local lines = {}
+    local lines = table.create(math.max(16, math.floor(#tokens / 5)))
     local current = {}
 
     local function flushLine()
@@ -633,7 +745,7 @@ function Highlighter:RunLines(source)
         current = {}
     end
 
-    for _, tok in ipairs(tokens) do
+    for _, tok in tokens do
         if tok.type == "newline" then
             flushLine()
         else
@@ -651,7 +763,7 @@ function Highlighter:RunLines(source)
                 end
 
                 local subLines = splitLines(escaped)
-                for si, sl in ipairs(subLines) do
+                for si, sl in subLines do
                     if si > 1 then
                         flushLine()
                     end
@@ -700,11 +812,11 @@ function Explorer.new()
     self.HL = Highlighter.new()
     self._visible = true
     self._alive = true
-    self._nodeConns = {}
+    self._nodeJanitors = setmetatable({}, { __mode = "k" })
     self._pendingUpdate = false
     self._currentScriptInst = nil
     self._viewMode = "decompile"
-    self._expandedNodes = {}
+    self._expandedNodes = setmetatable({}, { __mode = "k" })
     self._frameCount = 0
     self._colorPickerPropIdx = nil
     self._hlLines = {}
@@ -713,6 +825,7 @@ function Explorer.new()
     self._codeLineHMeasured = false
     self._lastRenderedFirst = -1
     self._lastRenderedLast = -1
+    self._searchQuery = ""
 
     initIconMapAsset()
     self:FetchAPI()
@@ -731,7 +844,7 @@ function Explorer.new()
         if #self.Selected == 0 then
             return
         end
-        for _, row in ipairs(self.PropRows) do
+        for _, row in self.PropRows do
             if row.Frame.Visible and row.Idx >= 1 and row.Idx <= #self.Props then
                 local prop = self.Props[row.Idx]
                 if AUTO_UPDATE_PROPS[prop.Name] then
@@ -755,8 +868,11 @@ function Explorer:GetPrimarySelected()
 end
 
 function Explorer:IsSelected(inst)
-    for _, sel in ipairs(self.Selected) do
-        if sel == inst then
+    if not inst then
+        return false
+    end
+    for _, sel in self.Selected do
+        if compare_func(sel, inst) then
             return true
         end
     end
@@ -771,13 +887,13 @@ function Explorer:AddToSelection(inst)
 end
 
 function Explorer:RemoveFromSelection(inst)
-    for i, sel in ipairs(self.Selected) do
-        if sel == inst then
+    for i, sel in self.Selected do
+        if compare_func(sel, inst) then
             table.remove(self.Selected, i)
             break
         end
     end
-    if self._lastSelected == inst then
+    if self._lastSelected and compare_func(self._lastSelected, inst) then
         self._lastSelected = if #self.Selected > 0 then self.Selected[#self.Selected] else nil
     end
 end
@@ -822,28 +938,37 @@ function Explorer:ScheduleUpdate()
 end
 
 function Explorer:ConnectNode(inst)
-    if self._nodeConns[inst] then
+    if self._nodeJanitors[inst] then
         return
     end
-    local conns = {}
+    local janitor = RBXJanitor.new()
+    self._nodeJanitors[inst] = janitor
+
     local ok1, c1 = pcall(function()
-        return inst.ChildAdded:Connect(function()
+        return inst.ChildAdded:Connect(function(child)
             if not self._alive then
                 return
             end
-            for _, node in ipairs(self.Flat) do
-                if node.Instance == inst then
-                    node.Children = nil
-                    node.HasKids = nil
+            local targetExpanded = false
+            for _, node in self.Flat do
+                if compare_func(node.Instance, inst) then
+                    node.HasKids = true
+                    targetExpanded = node.Expanded == true
+                    if targetExpanded then
+                        node.Children = nil
+                    end
                     break
                 end
             end
-            self:ScheduleUpdate()
+            if targetExpanded or self._searchQuery ~= "" then
+                self:ScheduleUpdate()
+            end
         end)
     end)
     if ok1 and c1 then
-        conns[#conns + 1] = c1
+        janitor:Add(c1)
     end
+
     local ok2, c2 = pcall(function()
         return inst.ChildRemoved:Connect(function(child)
             if not self._alive then
@@ -857,41 +982,53 @@ function Explorer:ConnectNode(inst)
                     self:LoadProperties(self:GetPrimarySelected())
                 end
             end
-            for _, node in ipairs(self.Flat) do
-                if node.Instance == inst then
-                    node.Children = nil
-                    node.HasKids = nil
+            local targetExpanded = false
+            for _, node in self.Flat do
+                if compare_func(node.Instance, inst) then
+                    targetExpanded = node.Expanded == true
+                    if targetExpanded then
+                        node.Children = nil
+                        node.HasKids = nil
+                    end
                     break
                 end
             end
-            if self._nodeConns[child] then
-                for _, cn in ipairs(self._nodeConns[child]) do
-                    pcall(function()
-                        cn:Disconnect()
-                    end)
-                end
-                self._nodeConns[child] = nil
+            if self._nodeJanitors[child] then
+                self._nodeJanitors[child]:Destroy()
+                self._nodeJanitors[child] = nil
             end
-            self:ScheduleUpdate()
+            self._expandedNodes[child] = nil
+            if targetExpanded or self._searchQuery ~= "" then
+                self:ScheduleUpdate()
+            end
         end)
     end)
     if ok2 and c2 then
-        conns[#conns + 1] = c2
+        janitor:Add(c2)
     end
-    if #conns > 0 then
-        self._nodeConns[inst] = conns
+
+    local ok3, c3 = pcall(function()
+        return inst.AncestryChanged:Connect(function(_, parent)
+            if parent == nil then
+                if self._nodeJanitors[inst] then
+                    self._nodeJanitors[inst]:Destroy()
+                    self._nodeJanitors[inst] = nil
+                end
+                self._expandedNodes[inst] = nil
+            end
+        end)
+    end)
+    if ok3 and c3 then
+        janitor:Add(c3)
     end
 end
 
 function Explorer:DisconnectAllNodes()
-    for _, conns in pairs(self._nodeConns) do
-        for _, conn in ipairs(conns) do
-            pcall(function()
-                conn:Disconnect()
-            end)
-        end
+    for inst, janitor in self._nodeJanitors do
+        janitor:Destroy()
     end
-    self._nodeConns = {}
+    self._nodeJanitors = setmetatable({}, { __mode = "k" })
+    self._expandedNodes = setmetatable({}, { __mode = "k" })
 end
 
 function Explorer:FetchAPI()
@@ -904,15 +1041,15 @@ function Explorer:FetchAPI()
     if not ok or not data then
         return
     end
-    for _, classData in ipairs(data.Classes) do
+    for _, classData in data.Classes do
         local props = {}
-        for _, member in ipairs(classData.Members) do
+        for _, member in classData.Members do
             if member.MemberType ~= "Property" then
                 continue
             end
             local skip = false
             if member.Tags then
-                for _, tag in ipairs(member.Tags) do
+                for _, tag in member.Tags do
                     if tag == "Deprecated" or tag == "Hidden" or tag == "NotScriptable" then
                         skip = true
                         break
@@ -984,7 +1121,7 @@ function Explorer:GetProps(className)
         if not cls then
             break
         end
-        for _, prop in ipairs(cls.Properties) do
+        for _, prop in cls.Properties do
             if not seen[prop.Name] then
                 seen[prop.Name] = true
                 props[#props + 1] = prop
@@ -1017,6 +1154,9 @@ function Explorer:FullPath(inst)
 end
 
 function Explorer:HasChildren(node)
+    if self._searchQuery ~= "" then
+        return false
+    end
     if node.HasKids ~= nil then
         return node.HasKids
     end
@@ -1024,9 +1164,12 @@ function Explorer:HasChildren(node)
         node.HasKids = #getnil() > 0
         return node.HasKids
     end
-    local ok, children = pcall(function()
-        return node.Instance:GetChildren()
-    end)
+    local okFirst, firstChild = pcall(node.Instance.FindFirstChildWhichIsA, node.Instance, "Instance")
+    if okFirst and firstChild then
+        node.HasKids = true
+        return true
+    end
+    local ok, children = pcall(node.Instance.GetChildren, node.Instance)
     node.HasKids = ok and children and #children > 0
     return node.HasKids
 end
@@ -1157,8 +1300,73 @@ function Explorer:BuildUI()
         Parent = self.InnerBorder,
     })
 
+    local searchContainer = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 24),
+        Position = UDim2.new(0, 0, 0, 0),
+        BackgroundColor3 = Theme.Sf,
+        BorderSizePixel = 0,
+        ZIndex = 4,
+        Parent = leftPanel,
+    })
+
+    self.SearchBox = new("TextBox", {
+        Size = UDim2.new(1, -28, 1, -4),
+        Position = UDim2.new(0, 6, 0, 2),
+        BackgroundTransparency = 1,
+        Text = "",
+        PlaceholderText = "Search instances...",
+        PlaceholderColor3 = Theme.Sub,
+        TextColor3 = Theme.Tx,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Font = Enum.Font.Gotham,
+        TextSize = 12,
+        ClearTextOnFocus = false,
+        ZIndex = 5,
+        Parent = searchContainer,
+    })
+
+    local clearSearchBtn = new("TextButton", {
+        Size = UDim2.new(0, 18, 0, 18),
+        Position = UDim2.new(1, -22, 0, 3),
+        BackgroundTransparency = 1,
+        Text = "x",
+        TextColor3 = Theme.Sub,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        ZIndex = 5,
+        Parent = searchContainer,
+    })
+
+    clearSearchBtn.MouseButton1Click:Connect(function()
+        self.SearchBox.Text = ""
+    end)
+    clearSearchBtn.MouseEnter:Connect(function()
+        clearSearchBtn.TextColor3 = Theme.Tx
+    end)
+    clearSearchBtn.MouseLeave:Connect(function()
+        clearSearchBtn.TextColor3 = Theme.Sub
+    end)
+
+    new("Frame", {
+        Size = UDim2.new(1, 0, 0, 1),
+        Position = UDim2.new(0, 0, 0, 24),
+        BackgroundColor3 = Theme.Bd,
+        BorderSizePixel = 0,
+        ZIndex = 4,
+        Parent = leftPanel,
+    })
+
+    self.SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+        local text = self.SearchBox.Text:lower():match("^%s*(.-)%s*$")
+        if self._searchQuery ~= text then
+            self._searchQuery = text
+            self:UpdateTree()
+        end
+    end)
+
     self.TreeScroll = new("ScrollingFrame", {
-        Size = UDim2.new(1, 0, 1, 0),
+        Size = UDim2.new(1, 0, 1, -25),
+        Position = UDim2.new(0, 0, 0, 25),
         BackgroundTransparency = 1,
         ScrollBarThickness = 3,
         ScrollBarImageColor3 = Theme.Acc,
@@ -1614,8 +1822,8 @@ function Explorer:RenderCodeView()
     self._lastRenderedFirst = visFirst
     self._lastRenderedLast = visLast
 
-    local codeParts = {}
-    local gutterParts = {}
+    local codeParts = table.create(visLast - visFirst + 1)
+    local gutterParts = table.create(visLast - visFirst + 1)
     local gutterWidth = #tostring(self._totalCodeLines)
 
     for i = visFirst, visLast do
@@ -1697,7 +1905,7 @@ function Explorer:BuildContextMenu()
 end
 
 function Explorer:ClearCtx()
-    for _, child in ipairs(self.CtxFrame:GetChildren()) do
+    for _, child in self.CtxFrame:GetChildren() do
         if child:IsA("TextButton") or (child:IsA("Frame") and child.Name == "Sep") then
             child:Destroy()
         end
@@ -1774,7 +1982,7 @@ function Explorer:ShowCtx(inst)
             return inst:Clone()
         end)
         if ok and clone then
-            self.Clipboard = clone
+            self.Clipboard = cloneref(clone)
         end
     end)
     self:AddCtxBtn("Paste Into", next(), function()
@@ -1814,8 +2022,8 @@ function Explorer:ShowCtx(inst)
     end)
     self:AddCtxSep(next())
     self:AddCtxBtn("Expand", next(), function()
-        for _, node in ipairs(self.Flat) do
-            if node.Instance == inst then
+        for _, node in self.Flat do
+            if compare_func(node.Instance, inst) then
                 node.Expanded = true
                 self._expandedNodes[inst] = true
                 node.Children = nil
@@ -1826,8 +2034,8 @@ function Explorer:ShowCtx(inst)
         end
     end)
     self:AddCtxBtn("Collapse", next(), function()
-        for _, node in ipairs(self.Flat) do
-            if node.Instance == inst then
+        for _, node in self.Flat do
+            if compare_func(node.Instance, inst) then
                 node.Expanded = false
                 self._expandedNodes[inst] = nil
                 node.Children = nil
@@ -1911,8 +2119,8 @@ function Explorer:ShowCtx(inst)
 end
 
 function Explorer:InvNode(inst)
-    for _, node in ipairs(self.Flat) do
-        if node.Instance == inst then
+    for _, node in self.Flat do
+        if compare_func(node.Instance, inst) then
             node.Children = nil
             node.HasKids = nil
             break
@@ -1930,8 +2138,8 @@ function Explorer:InvParent(inst)
             self:LoadProperties(self:GetPrimarySelected())
         end
     end
-    for _, node in ipairs(self.Flat) do
-        if inst.Parent and node.Instance == inst.Parent then
+    for _, node in self.Flat do
+        if inst.Parent and compare_func(node.Instance, inst.Parent) then
             node.Children = nil
             node.HasKids = nil
             break
@@ -1942,14 +2150,14 @@ end
 
 function Explorer:ClearProps()
     self.Props = {}
-    for _, conn in ipairs(self.PropConns) do
+    for _, conn in self.PropConns do
         pcall(function()
             conn:Disconnect()
         end)
     end
     self.PropConns = {}
     self.PropScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    for _, row in ipairs(self.PropRows) do
+    for _, row in self.PropRows do
         row.Frame.Visible = false
         row.Idx = 0
     end
@@ -2004,6 +2212,8 @@ function Explorer:BuildTreeRows()
             Hovered = false,
         }
 
+        local lastClickTime = 0
+
         expand.MouseButton1Click:Connect(function()
             if row.Idx < 1 or row.Idx > #self.Flat then
                 return
@@ -2026,6 +2236,15 @@ function Explorer:BuildTreeRows()
                 return
             end
             local node = self.Flat[row.Idx]
+            local now = os.clock()
+
+            if (now - lastClickTime) < 0.35 then
+                if node.Instance:IsA("LuaSourceContainer") then
+                    self:OpenScript(node.Instance)
+                end
+            end
+            lastClickTime = now
+
             local ctrlHeld = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
             local shiftHeld = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
 
@@ -2037,8 +2256,8 @@ function Explorer:BuildTreeRows()
                 end
             elseif shiftHeld and self._lastSelected then
                 local anchorIdx = nil
-                for fi, fn in ipairs(self.Flat) do
-                    if fn.Instance == self._lastSelected then
+                for fi, fn in self.Flat do
+                    if compare_func(fn.Instance, self._lastSelected) then
                         anchorIdx = fi
                         break
                     end
@@ -2209,7 +2428,7 @@ function Explorer:BuildColorPicker()
                     pcall(function()
                         self:GetPrimarySelected()[prop.Name] = bc
                     end)
-                    for _, r in ipairs(self.PropRows) do
+                    for _, r in self.PropRows do
                         if r.Frame.Visible and r.Idx == propIdx then
                             self:FmtProp(r)
                             break
@@ -2379,18 +2598,18 @@ end
 function Explorer:BuildTree()
     self.Nodes = {}
     self.Nodes[#self.Nodes + 1] = {
-        Instance = game,
+        Instance = cloneref(game),
         Depth = 0,
         Expanded = true,
         Children = nil,
         HasKids = true,
     }
-    self._expandedNodes[game] = true
+    self._expandedNodes[self.Nodes[1].Instance] = true
 
     local nilFolder = Instance.new("Folder")
     nilFolder.Name = "Nil Instances"
     self.Nodes[#self.Nodes + 1] = {
-        Instance = nilFolder,
+        Instance = cloneref(nilFolder),
         Depth = 0,
         Expanded = false,
         Children = nil,
@@ -2399,32 +2618,41 @@ function Explorer:BuildTree()
 end
 
 function Explorer:GetChildNodes(node)
+    if self._searchQuery ~= "" then
+        return {}
+    end
+    if not node.Expanded and node.Depth > 0 then
+        return {}
+    end
     if node.Children then
         return node.Children
     end
     local children = {}
     if node.Instance.Name == "Nil Instances" and node.Depth == 0 then
-        for _, inst in ipairs(getnil()) do
+        local nilList = getnil()
+        children = table.create(#nilList)
+        for _, inst in nilList do
             if inst ~= game then
+                local safeInst = cloneref(inst)
                 children[#children + 1] = {
-                    Instance = inst,
+                    Instance = safeInst,
                     Depth = node.Depth + 1,
-                    Expanded = self._expandedNodes[inst] == true,
+                    Expanded = self._expandedNodes[safeInst] == true,
                     Children = nil,
                     HasKids = nil,
                 }
             end
         end
     else
-        local ok, list = pcall(function()
-            return node.Instance:GetChildren()
-        end)
+        local ok, list = pcall(node.Instance.GetChildren, node.Instance)
         if ok and list then
-            for _, inst in ipairs(list) do
+            children = table.create(#list)
+            for _, inst in list do
+                local safeInst = cloneref(inst)
                 children[#children + 1] = {
-                    Instance = inst,
+                    Instance = safeInst,
                     Depth = node.Depth + 1,
-                    Expanded = self._expandedNodes[inst] == true,
+                    Expanded = self._expandedNodes[safeInst] == true,
                     Children = nil,
                     HasKids = nil,
                 }
@@ -2445,25 +2673,95 @@ function Explorer:GetChildNodes(node)
     return children
 end
 
-function Explorer:Flatten()
-    self.Flat = {}
-    local function walk(node)
-        self.Flat[#self.Flat + 1] = node
-        if node.Expanded then
-            for _, child in ipairs(self:GetChildNodes(node)) do
-                walk(child)
+function Explorer:PerformSearch(query)
+    local results = {}
+    local count = 0
+    local maxResults = 300
+
+    local function checkInst(inst)
+        if not inst then
+            return false
+        end
+        local name = ""
+        pcall(function()
+            name = inst.Name
+        end)
+        local className = ""
+        pcall(function()
+            className = inst.ClassName
+        end)
+        if name:lower():find(query, 1, true) or className:lower():find(query, 1, true) then
+            count += 1
+            local safe = cloneref(inst)
+            results[count] = {
+                Instance = safe,
+                Depth = 0,
+                Expanded = false,
+                Children = nil,
+                HasKids = false,
+            }
+            if count >= maxResults then
+                return true
+            end
+        end
+        return false
+    end
+
+    local okChildren, gameChildren = pcall(game.GetChildren, game)
+    if okChildren and gameChildren then
+        for _, child in gameChildren do
+            if checkInst(child) then
+                break
+            end
+            local okDesc, desc = pcall(child.GetDescendants, child)
+            if okDesc and desc then
+                for _, d in desc do
+                    if checkInst(d) then
+                        break
+                    end
+                end
+            end
+            if count >= maxResults then
+                break
             end
         end
     end
-    for _, node in ipairs(self.Nodes) do
-        walk(node)
+
+    if count < maxResults then
+        local nilList = getnil()
+        for _, inst in nilList do
+            if checkInst(inst) then
+                break
+            end
+        end
+    end
+
+    return results
+end
+
+function Explorer:Flatten()
+    if self._searchQuery ~= "" then
+        self.Flat = self:PerformSearch(self._searchQuery)
+    else
+        self.Flat = {}
+        local function walk(node)
+            self.Flat[#self.Flat + 1] = node
+            if node.Expanded then
+                for _, child in self:GetChildNodes(node) do
+                    walk(child)
+                end
+            end
+        end
+        for _, node in self.Nodes do
+            walk(node)
+        end
     end
 end
 
 function Explorer:UpdateTree()
     self:Flatten()
     self.TreeScroll.CanvasSize = UDim2.new(0, 0, 0, #self.Flat * ROW_H)
-    for _, row in ipairs(self.TreeRows) do
+    for _, row in self.TreeRows do
         row.Idx = 0
     end
     self:RenderTree()
@@ -2515,14 +2813,14 @@ function Explorer:RenderTree()
     end
 
     local assigned = {}
-    for _, row in ipairs(self.TreeRows) do
+    for _, row in self.TreeRows do
         if row.Idx >= 1 and needed[row.Idx] then
             assigned[row.Idx] = row
         end
     end
 
     local freePool = {}
-    for _, row in ipairs(self.TreeRows) do
+    for _, row in self.TreeRows do
         if row.Idx == 0 or (row.Idx >= 1 and not needed[row.Idx]) then
             if not assigned[row.Idx] then
                 row.Frame.Visible = false
@@ -2533,7 +2831,7 @@ function Explorer:RenderTree()
         end
     end
 
-    for _, row in ipairs(self.TreeRows) do
+    for _, row in self.TreeRows do
         if row.Idx >= 1 and not needed[row.Idx] and not assigned[row.Idx] then
             row.Frame.Visible = false
             row.Idx = 0
@@ -2571,15 +2869,17 @@ function Explorer:RenderTree()
     end
 end
 
+local function readProp(inst, propName)
+    return inst[propName]
+end
+
 function Explorer:FmtProp(row)
     local primary = self:GetPrimarySelected()
     if row.Idx < 1 or row.Idx > #self.Props or not primary then
         return
     end
     local prop = self.Props[row.Idx]
-    local ok, val = pcall(function()
-        return primary[prop.Name]
-    end)
+    local ok, val = pcall(readProp, primary, prop.Name)
     if not ok then
         row.Checkbox.Visible = false
         row.ColorBtn.Visible = false
@@ -2645,7 +2945,7 @@ function Explorer:LoadProperties(inst)
         self:ClearProps()
         return
     end
-    for _, conn in ipairs(self.PropConns) do
+    for _, conn in self.PropConns do
         pcall(function()
             conn:Disconnect()
         end)
@@ -2659,7 +2959,7 @@ function Explorer:LoadProperties(inst)
     end)
     local allProps = self:GetProps(className)
     local validProps = {}
-    for _, prop in ipairs(allProps) do
+    for _, prop in allProps do
         local readable = pcall(function()
             local _ = inst[prop.Name]
         end)
@@ -2669,18 +2969,19 @@ function Explorer:LoadProperties(inst)
     end
     self.Props = validProps
 
-    for _, row in ipairs(self.PropRows) do
+    for _, row in self.PropRows do
         row.Idx = 0
         row.Frame.Visible = false
     end
 
-    for propIdx, prop in ipairs(validProps) do
+    for propIdx, prop in validProps do
         local connOk, conn = pcall(function()
             return inst:GetPropertyChangedSignal(prop.Name):Connect(function()
-                if self:GetPrimarySelected() ~= inst then
+                local primary = self:GetPrimarySelected()
+                if not primary or not compare_func(primary, inst) then
                     return
                 end
-                for _, row in ipairs(self.PropRows) do
+                for _, row in self.PropRows do
                     if row.Frame.Visible and row.Idx == propIdx then
                         self:FmtProp(row)
                         break
@@ -2698,7 +2999,8 @@ function Explorer:LoadProperties(inst)
     self:RenderProps()
 
     task.defer(function()
-        if self:GetPrimarySelected() == inst and #self.Props > 0 then
+        local primary = self:GetPrimarySelected()
+        if primary and compare_func(primary, inst) and #self.Props > 0 then
             self:RenderProps()
         end
     end)
@@ -2707,7 +3009,7 @@ end
 function Explorer:RenderProps()
     local primary = self:GetPrimarySelected()
     if not primary or #self.Props == 0 then
-        for _, row in ipairs(self.PropRows) do
+        for _, row in self.PropRows do
             row.Frame.Visible = false
             row.Idx = 0
         end
@@ -2729,14 +3031,14 @@ function Explorer:RenderProps()
     end
 
     local assigned = {}
-    for _, row in ipairs(self.PropRows) do
+    for _, row in self.PropRows do
         if row.Idx >= 1 and needed[row.Idx] then
             assigned[row.Idx] = row
         end
     end
 
     local freePool = {}
-    for _, row in ipairs(self.PropRows) do
+    for _, row in self.PropRows do
         if row.Idx >= 1 and not needed[row.Idx] then
             row.Frame.Visible = false
             row.Idx = 0
@@ -2776,7 +3078,7 @@ function Explorer:OpenScript(inst)
     if not inst:IsA("LuaSourceContainer") then
         return
     end
-    self._currentScriptInst = inst
+    self._currentScriptInst = cloneref(inst)
     self._viewMode = "decompile"
     self.DumpBtn.Text = "Dump"
 
@@ -2787,7 +3089,7 @@ function Explorer:OpenScript(inst)
     self.ScriptTitle.Text = name .. " — Script Viewer"
     self.ScriptWin.Visible = true
     self.RawSource = ""
-    self:SetViewerError('<font color="#5C6370">-- Decompiling...</font>')
+    self:SetViewerError('<font color="#5C6370">Decompiling...</font>')
 
     task.spawn(function()
         local ok, src = pcall(decompile_func, inst)
@@ -2800,8 +3102,8 @@ function Explorer:OpenScript(inst)
                 self:SetViewerContent(hlLines)
             else
                 local plainLines = splitLines(src)
-                local escaped = {}
-                for i, line in ipairs(plainLines) do
+                local escaped = table.create(#plainLines)
+                for i, line in plainLines do
                     escaped[i] = line:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
                 end
                 self:SetViewerContent(escaped)
@@ -2809,7 +3111,7 @@ function Explorer:OpenScript(inst)
         else
             self.RawSource = ""
             self:SetViewerError(
-                '<font color="#E06C75">-- Decompile failed\n-- ' .. tostring(src) .. "</font>"
+                '<font color="#E06C75">Decompile failed\n' .. tostring(src) .. "</font>"
             )
         end
     end)
@@ -2862,7 +3164,7 @@ function Explorer:SaveBytecode(inst)
 end
 
 function Explorer:BuildDumpText(scriptInst)
-    local dump = ""
+    local parts = table.create(1024)
     local data_base = {}
     local dumped_functions = {}
     local function_count = 0
@@ -2876,14 +3178,18 @@ function Explorer:BuildDumpText(scriptInst)
         if newLine == nil then
             newLine = true
         end
-        dump = dump .. string.rep(TAB, indent) .. tostring(str) .. (newLine and "\n" or "")
+        parts[#parts + 1] = string.rep(TAB, indent)
+        parts[#parts + 1] = tostring(str)
+        if newLine then
+            parts[#parts + 1] = "\n"
+        end
     end
 
     local function dumpTable(input, indent, index)
         indent = indent < 0 and 0 or indent
-        add(("%s [%s] %s"):format(tostring(index), tostring(typeof(input)), tostring(input)), indent - 1)
+        add(("%s [%s] %s"):format(safeTostring(index), safeTostring(typeof(input)), safeTostring(input)), indent - 1)
         local count = 0
-        for idx, value in pairs(input) do
+        for idx, value in next, input do
             count = count + 1
             if type(value) == "function" then
                 add(("%d [function] = %s"):format(count, getFuncName(value)), indent)
@@ -2896,7 +3202,7 @@ function Explorer:BuildDumpText(scriptInst)
                     add(("%d [table] (Recursive table detected)"):format(count), indent)
                 end
             else
-                add(("%d [%s] = %s"):format(count, tostring(typeof(value)), tostring(value)), indent)
+                add(("%d [%s] = %s"):format(count, safeTostring(typeof(value)), safeTostring(value)), indent)
             end
         end
     end
@@ -2966,7 +3272,7 @@ function Explorer:BuildDumpText(scriptInst)
         add(("\nFunction Upvalues: %s"):format(fname), indent)
         local okU, ups = pcall(getupvalues_func, func)
         if okU and ups then
-            for index, upvalue in pairs(ups) do
+            for index, upvalue in ups do
                 if type(upvalue) == "function" then
                     add(("%d [function] = %s"):format(index, getFuncName(upvalue)), indent + 1)
                 elseif type(upvalue) == "table" then
@@ -2978,7 +3284,7 @@ function Explorer:BuildDumpText(scriptInst)
                         add(("%d [table] (Recursive table detected)"):format(index), indent + 1)
                     end
                 else
-                    add(("%d [%s] = %s"):format(index, tostring(typeof(upvalue)), tostring(upvalue)), indent + 1)
+                    add(("%d [%s] = %s"):format(index, safeTostring(typeof(upvalue)), safeTostring(upvalue)), indent + 1)
                 end
             end
         end
@@ -2986,7 +3292,7 @@ function Explorer:BuildDumpText(scriptInst)
         add(("\nFunction Constants: %s"):format(fname), indent)
         local okC, consts = pcall(getconstants_func, func)
         if okC and consts then
-            for index, constant in pairs(consts) do
+            for index, constant in consts do
                 if type(constant) == "function" then
                     add(("%d [function] = %s"):format(index, getFuncName(constant)), indent + 1)
                 elseif type(constant) == "table" then
@@ -2998,7 +3304,7 @@ function Explorer:BuildDumpText(scriptInst)
                         add(("%d [table] (Recursive table detected)"):format(index), indent + 1)
                     end
                 else
-                    add(("%d [%s] = %s"):format(index, tostring(typeof(constant)), tostring(constant)), indent + 1)
+                    add(("%d [%s] = %s"):format(index, safeTostring(typeof(constant)), safeTostring(constant)), indent + 1)
                 end
             end
         end
@@ -3007,13 +3313,13 @@ function Explorer:BuildDumpText(scriptInst)
             local okP, protos = pcall(debug.getprotos, func)
             if okP and protos and #protos > 0 then
                 add(("\nFunction Protos: %s"):format(fname), indent)
-                for i, proto in ipairs(protos) do
+                for i, proto in protos do
                     if not dumped_functions[proto] then
                         add(("[%d] %s"):format(i, getFuncName(proto)), indent + 1)
                         local okPC, pConsts = pcall(getconstants_func, proto)
                         if okPC and pConsts then
-                            for j, c in pairs(pConsts) do
-                                local cs = tostring(c)
+                            for j, c in pConsts do
+                                local cs = safeTostring(c)
                                 if type(c) == "string" then
                                     cs = '"' .. c .. '"'
                                 end
@@ -3022,8 +3328,8 @@ function Explorer:BuildDumpText(scriptInst)
                         end
                         local okPU, pUps = pcall(getupvalues_func, proto)
                         if okPU and pUps then
-                            for j, u in pairs(pUps) do
-                                local us = tostring(u)
+                            for j, u in pUps do
+                                local us = safeTostring(u)
                                 if type(u) == "string" then
                                     us = '"' .. u .. '"'
                                 end
@@ -3038,17 +3344,20 @@ function Explorer:BuildDumpText(scriptInst)
         end
     end
 
-    dump = ("-- Function Dumper\n-- Script Path: %s\n\n--[[\n"):format(fullPath)
+    add(("\nScript Path: %s\n\n"):format(fullPath), 0, false)
 
     if getgc then
         pcall(function()
-            for _, _function in pairs(getgc()) do
+            for _, _function in getgc() do
                 if typeof(_function) == "function" then
                     local matched = false
                     pcall(function()
-                        local env = getfenv(_function)
-                        if env and env.script and env.script == scriptInst then
-                            matched = true
+                        local okEnv, env = pcall(getfenv, _function)
+                        if okEnv and type(env) == "table" then
+                            local scr = rawget(env, "script")
+                            if scr and compare_func(scr, scriptInst) then
+                                matched = true
+                            end
                         end
                     end)
                     if not matched then
@@ -3093,14 +3402,14 @@ function Explorer:BuildDumpText(scriptInst)
         add("(No functions found via getgc for this script)", 0)
     end
 
-    dump = dump .. "\n]]"
+    local dump = table.concat(parts)
     return dump, function_count
 end
 
 function Explorer:FormatDumpLines(text)
     local rawLines = splitLines(text)
-    local result = {}
-    for _, line in ipairs(rawLines) do
+    local result = table.create(#rawLines)
+    for _, line in rawLines do
         local escaped = line:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
         if line:match("^%-%-") or line:match("^%-%-%[%[") or line:match("^%]%]") then
             result[#result + 1] = '<font color="#5C6370">' .. escaped .. "</font>"
@@ -3156,7 +3465,7 @@ function Explorer:DumpScript(inst)
     if not inst:IsA("LuaSourceContainer") then
         return
     end
-    self._currentScriptInst = inst
+    self._currentScriptInst = cloneref(inst)
     self._viewMode = "dump"
     self.DumpBtn.Text = "Decompile"
 
@@ -3167,7 +3476,7 @@ function Explorer:DumpScript(inst)
     self.ScriptTitle.Text = name .. " — Dump"
     self.ScriptWin.Visible = true
     self.RawSource = ""
-    self:SetViewerError('<font color="#5C6370">-- Analyzing...</font>')
+    self:SetViewerError('<font color="#5C6370">Analyzing...</font>')
 
     task.spawn(function()
         local dumpText, funcCount = self:BuildDumpText(inst)
@@ -3191,12 +3500,12 @@ function Explorer:DumpScript(inst)
                 return self.HL:RunLines(decompSrc)
             end)
             if okHl and srcHlLines then
-                for _, line in ipairs(srcHlLines) do
+                for _, line in srcHlLines do
                     allHlLines[#allHlLines + 1] = line
                 end
             else
                 local plainLines = splitLines(decompSrc)
-                for _, line in ipairs(plainLines) do
+                for _, line in plainLines do
                     allHlLines[#allHlLines + 1] = line:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
                 end
             end
@@ -3205,7 +3514,7 @@ function Explorer:DumpScript(inst)
         end
 
         local dumpHlLines = self:FormatDumpLines(dumpText)
-        for _, line in ipairs(dumpHlLines) do
+        for _, line in dumpHlLines do
             allHlLines[#allHlLines + 1] = line
         end
 
@@ -3224,14 +3533,157 @@ function Explorer:DumpScript(inst)
                 end
             end)
             self:SetViewerError(
-                '<font color="#E06C75">-- Dump too large to display\n-- Auto-saved to BlatantExplorer/Saved/'
+                '<font color="#E06C75">Dump too large to display\nAuto-saved to BlatantExplorer/Saved/'
                 .. safeName .. '_dump.txt</font>'
             )
         end
     end)
 end
 
+local function promptBypass(callback)
+    local promptGui = new("ScreenGui", {
+        Name = uid(),
+        ResetOnSpawn = false,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        Parent = gethui_func(),
+    })
+
+    local win = new("Frame", {
+        Size = UDim2.new(0, 380, 0, 150),
+        Position = UDim2.new(0.5, -190, 0.5, -75),
+        BackgroundColor3 = Theme.BdOuter,
+        BorderSizePixel = 0,
+        Active = true,
+        Parent = promptGui,
+    })
+
+    local inner = new("Frame", {
+        Size = UDim2.new(1, -2, 1, -2),
+        Position = UDim2.new(0, 1, 0, 1),
+        BackgroundColor3 = Theme.Inner,
+        BorderColor3 = Theme.Bd,
+        BorderSizePixel = 1,
+        ClipsDescendants = true,
+        Parent = win,
+    })
+
+    local topLine = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 2),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel = 0,
+        ZIndex = 5,
+        Parent = inner,
+    })
+    new("UIGradient", {
+        Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, Theme.AccAlt),
+            ColorSequenceKeypoint.new(0.5, Theme.Acc),
+            ColorSequenceKeypoint.new(1, Theme.AccEnd),
+        }),
+        Parent = topLine,
+    })
+
+    new("TextLabel", {
+        Size = UDim2.new(1, -16, 0, 22),
+        Position = UDim2.new(0, 8, 0, 2),
+        BackgroundTransparency = 1,
+        Text = "BlatantExplorer — Notice",
+        TextColor3 = Theme.Tx,
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 5,
+        Parent = inner,
+    })
+
+    makeDraggable(inner, win)
+
+    new("Frame", {
+        Size = UDim2.new(1, 0, 0, 1),
+        Position = UDim2.new(0, 0, 0, 24),
+        BackgroundColor3 = Theme.Bd,
+        BorderSizePixel = 0,
+        ZIndex = 5,
+        Parent = inner,
+    })
+
+    new("TextLabel", {
+        Size = UDim2.new(1, -24, 0, 50),
+        Position = UDim2.new(0, 12, 0, 32),
+        BackgroundTransparency = 1,
+        Text = "Note: Enable __mode bypass if you get detected without this mode?",
+        TextColor3 = Theme.Tx,
+        Font = Enum.Font.Gotham,
+        TextSize = 13,
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        TextYAlignment = Enum.TextYAlignment.Center,
+        ZIndex = 5,
+        Parent = inner,
+    })
+
+    local btnEnable = new("TextButton", {
+        Size = UDim2.new(0, 120, 0, 26),
+        Position = UDim2.new(0.5, -130, 1, -36),
+        BackgroundColor3 = Theme.InputBg,
+        BorderColor3 = Theme.InputBd,
+        BorderSizePixel = 1,
+        Text = "Enable",
+        TextColor3 = Theme.Tx,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        AutoButtonColor = false,
+        ZIndex = 5,
+        Parent = inner,
+    })
+
+    local btnDont = new("TextButton", {
+        Size = UDim2.new(0, 120, 0, 26),
+        Position = UDim2.new(0.5, 10, 1, -36),
+        BackgroundColor3 = Theme.InputBg,
+        BorderColor3 = Theme.InputBd,
+        BorderSizePixel = 1,
+        Text = "Don't",
+        TextColor3 = Theme.Sub,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        AutoButtonColor = false,
+        ZIndex = 5,
+        Parent = inner,
+    })
+
+    local function setupHover(btn, isPrimary)
+        btn.MouseEnter:Connect(function()
+            btn.BackgroundColor3 = Theme.CtxHv
+            btn.TextColor3 = if isPrimary then Theme.Acc else Theme.Tx
+        end)
+        btn.MouseLeave:Connect(function()
+            btn.BackgroundColor3 = Theme.InputBg
+            btn.TextColor3 = if isPrimary then Theme.Tx else Theme.Sub
+        end)
+    end
+    setupHover(btnEnable, true)
+    setupHover(btnDont, false)
+
+    btnEnable.MouseButton1Click:Connect(function()
+        promptGui:Destroy()
+        callback(true)
+    end)
+
+    btnDont.MouseButton1Click:Connect(function()
+        promptGui:Destroy()
+        callback(false)
+    end)
+end
+
 task.spawn(function()
-    local explorer = Explorer.new()
-    getgenv().BlatantExplorer = explorer
+    promptBypass(function(shouldEnable)
+        if shouldEnable then
+            pcall(function()
+                loadstring(game:HttpGet("https://raw.githubusercontent.com/TesterTD/BlatantExplorer/refs/heads/main/PatchUtility.luau"))()
+            end)
+        end
+        local explorer = Explorer.new()
+        getgenv().BlatantExplorer = explorer
+    end)
 end)
