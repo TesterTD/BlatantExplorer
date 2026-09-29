@@ -28,6 +28,45 @@ local function safeTostring(val)
     return tostring(val)
 end
 
+local function WeakGetChildren(inst)
+    if not inst then
+        return {}
+    end
+    local ok, raw = pcall(inst.GetChildren, inst)
+    if not ok or type(raw) ~= "table" then
+        return {}
+    end
+    setmetatable(raw, { __mode = "v" })
+    local out = table.create(#raw)
+    for i = 1, #raw do
+        local child = raw[i]
+        if child then
+            out[i] = cloneref(child)
+        end
+    end
+    return out
+end
+
+local function getPathArray(inst)
+    local arr = {}
+    local curr = inst
+    while curr and curr ~= game do
+        local okName, name = pcall(function() return curr.Name end)
+        if okName and name then
+            table.insert(arr, 1, name)
+        else
+            break
+        end
+        local okParent, parent = pcall(function() return curr.Parent end)
+        if okParent then
+            curr = parent
+        else
+            break
+        end
+    end
+    return arr
+end
+
 local RBXJanitor = {}
 RBXJanitor.__index = RBXJanitor
 
@@ -826,11 +865,14 @@ function Explorer.new()
     self._lastRenderedFirst = -1
     self._lastRenderedLast = -1
     self._searchQuery = ""
+    self.SearchIndex = {}
+    self.SearchIndexBuilt = false
 
     initIconMapAsset()
     self:FetchAPI()
     self:BuildUI()
     self:BuildTree()
+    self:BuildSearchIndex()
     self:UpdateTree()
 
     self._heartbeatConn = RunService.Heartbeat:Connect(function()
@@ -855,6 +897,140 @@ function Explorer.new()
     end)
 
     return self
+end
+
+function Explorer:BuildSearchIndex()
+    if self.SearchIndexBuilt then
+        return
+    end
+
+    local idx = {}
+    local count = 0
+
+    local function indexItem(inst, isNil)
+        if not inst then
+            return
+        end
+        local okN, name = pcall(function() return inst.Name end)
+        local okC, className = pcall(function() return inst.ClassName end)
+        if okN and okC and name and className then
+            count += 1
+            idx[count] = {
+                Name = name,
+                ClassName = className,
+                PathArray = if not isNil then getPathArray(inst) else nil,
+                IsNil = isNil,
+                Depth = 0,
+                Expanded = false,
+                Children = nil,
+                HasKids = false,
+                IsLazy = true,
+            }
+        end
+    end
+
+    local roots = WeakGetChildren(game)
+    for _, svc in roots do
+        if svc then
+            indexItem(svc, false)
+            local okDesc, desc = pcall(svc.GetDescendants, svc)
+            if okDesc and type(desc) == "table" then
+                setmetatable(desc, { __mode = "v" })
+                for _, d in desc do
+                    if d then
+                        indexItem(d, false)
+                    end
+                end
+            end
+        end
+    end
+
+    local nilList = getnil()
+    for _, inst in nilList do
+        if inst and inst ~= game then
+            indexItem(inst, true)
+        end
+    end
+
+    self.SearchIndex = idx
+    self.SearchIndexBuilt = true
+end
+
+function Explorer:ResolveNode(node)
+    if not node then
+        return nil
+    end
+    if not node.IsLazy then
+        return node.Instance
+    end
+    if node.ResolvedInstance and self:IsSelected(node.ResolvedInstance) then
+        return node.ResolvedInstance
+    end
+
+    local inst = nil
+    if node.IsNil then
+        local nilList = getnil()
+        for _, obj in nilList do
+            local okN, nm = pcall(function() return obj.Name end)
+            local okC, cls = pcall(function() return obj.ClassName end)
+            if okN and okC and nm == node.Name and cls == node.ClassName then
+                inst = obj
+                break
+            end
+        end
+    else
+        local parts = node.PathArray
+        if parts and #parts > 0 then
+            local current = nil
+            local okSvc, svc = pcall(game.GetService, game, parts[1])
+            if okSvc and svc then
+                current = svc
+            else
+                local okChild, ch = pcall(game.FindFirstChild, game, parts[1])
+                if okChild and ch then
+                    current = ch
+                end
+            end
+
+            if current then
+                for i = 2, #parts do
+                    local okChild, nextChild = pcall(current.FindFirstChild, current, parts[i])
+                    if okChild and nextChild then
+                        current = nextChild
+                    else
+                        current = nil
+                        break
+                    end
+                end
+            end
+            inst = current
+        end
+    end
+
+    if inst then
+        local safe = cloneref(inst)
+        node.ResolvedInstance = safe
+        return safe
+    end
+    return nil
+end
+
+function Explorer:GetNodeInstance(node)
+    if not node then
+        return nil
+    end
+    return node.Instance or node.ResolvedInstance
+end
+
+function Explorer:IsNodeSelected(node)
+    if not node then
+        return false
+    end
+    local inst = self:GetNodeInstance(node)
+    if inst then
+        return self:IsSelected(inst)
+    end
+    return false
 end
 
 function Explorer:GetPrimarySelected()
@@ -951,7 +1127,8 @@ function Explorer:ConnectNode(inst)
             end
             local targetExpanded = false
             for _, node in self.Flat do
-                if compare_func(node.Instance, inst) then
+                local nodeInst = self:GetNodeInstance(node)
+                if nodeInst and compare_func(nodeInst, inst) then
                     node.HasKids = true
                     targetExpanded = node.Expanded == true
                     if targetExpanded then
@@ -984,7 +1161,8 @@ function Explorer:ConnectNode(inst)
             end
             local targetExpanded = false
             for _, node in self.Flat do
-                if compare_func(node.Instance, inst) then
+                local nodeInst = self:GetNodeInstance(node)
+                if nodeInst and compare_func(nodeInst, inst) then
                     targetExpanded = node.Expanded == true
                     if targetExpanded then
                         node.Children = nil
@@ -1154,7 +1332,7 @@ function Explorer:FullPath(inst)
 end
 
 function Explorer:HasChildren(node)
-    if self._searchQuery ~= "" then
+    if self._searchQuery ~= "" or node.IsLazy then
         return false
     end
     if node.HasKids ~= nil then
@@ -1215,12 +1393,16 @@ function Explorer:OnTreeRMB(row)
         return
     end
     local node = self.Flat[row.Idx]
-    if not self:IsSelected(node.Instance) then
-        self:SetSingleSelection(node.Instance)
+    local inst = self:ResolveNode(node)
+    if not inst then
+        return
+    end
+    if not self:IsSelected(inst) then
+        self:SetSingleSelection(inst)
     end
     self:RenderTree()
     self:LoadProperties(self:GetPrimarySelected())
-    self:ShowCtx(node.Instance)
+    self:ShowCtx(inst)
 end
 
 function Explorer:BuildUI()
@@ -2023,7 +2205,8 @@ function Explorer:ShowCtx(inst)
     self:AddCtxSep(next())
     self:AddCtxBtn("Expand", next(), function()
         for _, node in self.Flat do
-            if compare_func(node.Instance, inst) then
+            local nodeInst = self:GetNodeInstance(node)
+            if nodeInst and compare_func(nodeInst, inst) then
                 node.Expanded = true
                 self._expandedNodes[inst] = true
                 node.Children = nil
@@ -2035,7 +2218,8 @@ function Explorer:ShowCtx(inst)
     end)
     self:AddCtxBtn("Collapse", next(), function()
         for _, node in self.Flat do
-            if compare_func(node.Instance, inst) then
+            local nodeInst = self:GetNodeInstance(node)
+            if nodeInst and compare_func(nodeInst, inst) then
                 node.Expanded = false
                 self._expandedNodes[inst] = nil
                 node.Children = nil
@@ -2120,7 +2304,8 @@ end
 
 function Explorer:InvNode(inst)
     for _, node in self.Flat do
-        if compare_func(node.Instance, inst) then
+        local nodeInst = self:GetNodeInstance(node)
+        if nodeInst and compare_func(nodeInst, inst) then
             node.Children = nil
             node.HasKids = nil
             break
@@ -2139,7 +2324,8 @@ function Explorer:InvParent(inst)
         end
     end
     for _, node in self.Flat do
-        if inst.Parent and compare_func(node.Instance, inst.Parent) then
+        local nodeInst = self:GetNodeInstance(node)
+        if inst.Parent and nodeInst and compare_func(nodeInst, inst.Parent) then
             node.Children = nil
             node.HasKids = nil
             break
@@ -2238,9 +2424,14 @@ function Explorer:BuildTreeRows()
             local node = self.Flat[row.Idx]
             local now = os.clock()
 
+            local inst = self:ResolveNode(node)
+            if not inst then
+                return
+            end
+
             if (now - lastClickTime) < 0.35 then
-                if node.Instance:IsA("LuaSourceContainer") then
-                    self:OpenScript(node.Instance)
+                if inst:IsA("LuaSourceContainer") then
+                    self:OpenScript(inst)
                 end
             end
             lastClickTime = now
@@ -2249,15 +2440,16 @@ function Explorer:BuildTreeRows()
             local shiftHeld = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
 
             if ctrlHeld then
-                if self:IsSelected(node.Instance) then
-                    self:RemoveFromSelection(node.Instance)
+                if self:IsSelected(inst) then
+                    self:RemoveFromSelection(inst)
                 else
-                    self:AddToSelection(node.Instance)
+                    self:AddToSelection(inst)
                 end
             elseif shiftHeld and self._lastSelected then
                 local anchorIdx = nil
                 for fi, fn in self.Flat do
-                    if compare_func(fn.Instance, self._lastSelected) then
+                    local fnInst = self:GetNodeInstance(fn)
+                    if fnInst and compare_func(fnInst, self._lastSelected) then
                         anchorIdx = fi
                         break
                     end
@@ -2268,15 +2460,18 @@ function Explorer:BuildTreeRows()
                     self.Selected = {}
                     for fi = startI, endI do
                         if fi >= 1 and fi <= #self.Flat then
-                            self.Selected[#self.Selected + 1] = self.Flat[fi].Instance
+                            local resolved = self:ResolveNode(self.Flat[fi])
+                            if resolved then
+                                self.Selected[#self.Selected + 1] = resolved
+                            end
                         end
                     end
-                    self._lastSelected = self.Flat[anchorIdx].Instance
+                    self._lastSelected = inst
                 else
-                    self:SetSingleSelection(node.Instance)
+                    self:SetSingleSelection(inst)
                 end
             else
-                self:SetSingleSelection(node.Instance)
+                self:SetSingleSelection(inst)
             end
 
             self:RenderTree()
@@ -2299,13 +2494,13 @@ function Explorer:BuildTreeRows()
 
         frame.MouseEnter:Connect(function()
             row.Hovered = true
-            if row.Idx >= 1 and row.Idx <= #self.Flat and not self:IsSelected(self.Flat[row.Idx].Instance) then
+            if row.Idx >= 1 and row.Idx <= #self.Flat and not self:IsNodeSelected(self.Flat[row.Idx]) then
                 frame.BackgroundColor3 = Theme.Hv
             end
         end)
         frame.MouseLeave:Connect(function()
             row.Hovered = false
-            if row.Idx >= 1 and row.Idx <= #self.Flat and not self:IsSelected(self.Flat[row.Idx].Instance) then
+            if row.Idx >= 1 and row.Idx <= #self.Flat and not self:IsNodeSelected(self.Flat[row.Idx]) then
                 frame.BackgroundColor3 = Theme.Bg
             end
         end)
@@ -2618,7 +2813,7 @@ function Explorer:BuildTree()
 end
 
 function Explorer:GetChildNodes(node)
-    if self._searchQuery ~= "" then
+    if self._searchQuery ~= "" or node.IsLazy then
         return {}
     end
     if not node.Expanded and node.Depth > 0 then
@@ -2644,11 +2839,10 @@ function Explorer:GetChildNodes(node)
             end
         end
     else
-        local ok, list = pcall(node.Instance.GetChildren, node.Instance)
-        if ok and list then
-            children = table.create(#list)
-            for _, inst in list do
-                local safeInst = cloneref(inst)
+        local list = WeakGetChildren(node.Instance)
+        children = table.create(#list)
+        for _, safeInst in list do
+            if safeInst then
                 children[#children + 1] = {
                     Instance = safeInst,
                     Depth = node.Depth + 1,
@@ -2677,60 +2871,15 @@ function Explorer:PerformSearch(query)
     local results = {}
     local count = 0
     local maxResults = 300
+    local source = self.SearchIndex or {}
 
-    local function checkInst(inst)
-        if not inst then
-            return false
-        end
-        local name = ""
-        pcall(function()
-            name = inst.Name
-        end)
-        local className = ""
-        pcall(function()
-            className = inst.ClassName
-        end)
-        if name:lower():find(query, 1, true) or className:lower():find(query, 1, true) then
+    for _, entry in source do
+        local name = entry.Name
+        local className = entry.ClassName
+        if (name and name:lower():find(query, 1, true)) or (className and className:lower():find(query, 1, true)) then
             count += 1
-            local safe = cloneref(inst)
-            results[count] = {
-                Instance = safe,
-                Depth = 0,
-                Expanded = false,
-                Children = nil,
-                HasKids = false,
-            }
+            results[count] = entry
             if count >= maxResults then
-                return true
-            end
-        end
-        return false
-    end
-
-    local okChildren, gameChildren = pcall(game.GetChildren, game)
-    if okChildren and gameChildren then
-        for _, child in gameChildren do
-            if checkInst(child) then
-                break
-            end
-            local okDesc, desc = pcall(child.GetDescendants, child)
-            if okDesc and desc then
-                for _, d in desc do
-                    if checkInst(d) then
-                        break
-                    end
-                end
-            end
-            if count >= maxResults then
-                break
-            end
-        end
-    end
-
-    if count < maxResults then
-        local nilList = getnil()
-        for _, inst in nilList do
-            if checkInst(inst) then
                 break
             end
         end
@@ -2784,16 +2933,20 @@ function Explorer:PopulateTreeRow(row, node, nodeIdx)
         row.Expand.Text = ""
     end
 
-    local instName = ""
-    pcall(function()
-        instName = node.Instance.Name
-    end)
+    local instName = node.Name or ""
+    if not node.IsLazy and node.Instance then
+        pcall(function()
+            instName = node.Instance.Name
+        end)
+    end
     row.Label.Text = instName
 
-    local className = ""
-    pcall(function()
-        className = node.Instance.ClassName
-    end)
+    local className = node.ClassName or ""
+    if not node.IsLazy and node.Instance then
+        pcall(function()
+            className = node.Instance.ClassName
+        end)
+    end
     self:ApplyIcon(row.IconFrame, className)
 end
 
@@ -2858,7 +3011,7 @@ function Explorer:RenderTree()
         if row and ni >= 1 and ni <= #self.Flat then
             local node = self.Flat[ni]
             row.Frame.Position = UDim2.new(0, 0, 0, (ni - 1) * ROW_H)
-            if self:IsSelected(node.Instance) then
+            if self:IsNodeSelected(node) then
                 row.Frame.BackgroundColor3 = Theme.Hi
                 row.Label.TextColor3 = Color3.new(1, 1, 1)
             else
